@@ -1,0 +1,43 @@
+# Stage 1: Build the Go application
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache git
+
+# Copy dependency files and download
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application
+# We use CGO_ENABLED=0 for a static binary if no CGO dependencies are used.
+# Playwright-go handles its driver internally.
+RUN CGO_ENABLED=0 GOOS=linux go build -v -o scraper ./cmd/scraper/main.go
+
+# Stage 2: Final minimal image
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+# Copy the binary from the builder
+COPY --from=builder /app/scraper .
+
+# The playwright-go driver is needed at runtime. 
+# In production, connecting to Browserless avoids needing browsers in this image.
+# However, the playwright-go library needs to find its driver.
+# We run a dummy command to ensure the driver is present in the binary or downloaded.
+# Actually, the driver is usually embedded or downloaded on first run.
+
+# Create non-root user
+RUN adduser -D -u 10001 appuser && \
+    chown appuser:appuser /app/scraper
+
+USER appuser
+
+ENTRYPOINT ["./scraper"]

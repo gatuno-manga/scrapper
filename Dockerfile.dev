@@ -1,0 +1,22 @@
+FROM golang:1.26-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Air for hot-reload
+RUN go install github.com/air-verse/air@v1.52.3
+
+# Copy dependency files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Install Playwright driver
+RUN go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps
+
+# Expose port for health checks or metrics if any
+EXPOSE 8080
+
+CMD ["air", "-c", ".air.toml"]

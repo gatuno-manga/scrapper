@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - developer
+  pull_request:
+    branches:
+      - main
+      - developer
+
+jobs:
+  ci:
+    uses: gatuno-manga/workflows/.github/workflows/go-ci.yml@main
+    with:
+      go_version: '1.26'
+      install_libvips: false
+
+  build-and-publish:
+    needs: ci
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/developer')
+    uses: gatuno-manga/workflows/.github/workflows/registry.yml@main
+    with:
+      image_name: gatuno-scraper
+      image_tag: ${{ github.ref == 'refs/heads/main' && 'latest' || 'staging' }}
+      build_context: .
+      dockerfile_path: Dockerfile.prod
+      runner_labels_json: '["self-hosted","linux","x64"]'
+    secrets: inherit

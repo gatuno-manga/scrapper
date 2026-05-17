@@ -1,0 +1,14 @@
+# Configuração do Lefthook para Go
+# Documentação: https://github.com/evilmartians/lefthook
+
+pre-commit:
+  parallel: true
+  commands:
+    check-secrets:
+      run: npx secretlint {staged_files}
+    go-fmt:
+      glob: "**/*.go"
+      run: go fmt {staged_files} && git add {staged_files}
+    go-vet:
+      glob: "**/*.go"
+      run: go vet {staged_files}

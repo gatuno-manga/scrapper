@@ -1,0 +1,22 @@
+# Enforce LF line endings for all text files
+* text=auto eol=lf
+
+# Explicitly mark Go files as text
+*.go text
+
+# Mark shell scripts as executable (if any)
+*.sh text eol=lf
+
+# Mark documentation and config as text
+*.md text
+*.yml text
+*.yaml text
+*.json text
+*.toml text
+
+# Prevent Git from messing with binary files
+*.jpg binary
+*.png binary
+*.webp binary
+*.gif binary
+*.ico binary

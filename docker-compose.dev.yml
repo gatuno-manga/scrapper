@@ -1,0 +1,43 @@
+name: gatuno
+
+services:
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    ports:
+      - "6060:6060"
+    depends_on:
+      - flaresolverr
+      - browserless
+    networks:
+      - gatuno-net
+
+  browserless:
+    image: browserless/chrome:latest
+    ports:
+      - "3002:3000"
+    environment:
+      - MAX_CONCURRENT_SESSIONS=10
+      - CONNECTION_TIMEOUT=300000
+      - ENABLE_DEBUGGER=true
+      - ENABLE_CORS=true
+    networks:
+      - gatuno-net
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: scraping-flaresolverr
+    environment:
+      - LOG_LEVEL=info
+    networks:
+      - gatuno-net
+
+networks:
+  gatuno-net:
+    external: true
+    name: gatuno_gatuno-net

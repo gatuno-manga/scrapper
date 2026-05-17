@@ -1,0 +1,26 @@
+# Binaries
+bin/
+tmp/
+main
+cli
+
+# Environment
+.env
+*.local
+
+# Dependencies
+vendor/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Go Test Coverage
+*.out
+*.prof
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo

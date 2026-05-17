@@ -1,0 +1,42 @@
+name: gatuno
+
+services:
+  browserless:
+    image: browserless/chrome:latest
+    container_name: gatuno-browserless
+    restart: always
+    environment:
+      - MAX_CONCURRENT_SESSIONS=10
+      - CONNECTION_TIMEOUT=300000
+    networks:
+      - gatuno-net
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: gatuno-flaresolverr
+    restart: always
+    environment:
+      - LOG_LEVEL=info
+    networks:
+      - gatuno-net
+
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: gatuno-scraper
+    restart: always
+    env_file: .env
+    environment:
+      - BROWSER_URL=ws://browserless:3000
+      - FLARESOLVERR_URL=http://flaresolverr:8191
+    depends_on:
+      - browserless
+      - flaresolverr
+    networks:
+      - gatuno-net
+
+networks:
+  gatuno-net:
+    name: gatuno_gatuno-net
+    driver: bridge
