@@ -20,6 +20,13 @@ type BrowserPool struct {
 }
 
 func NewBrowserPool(browserURL string, poolSize int) (*BrowserPool, error) {
+	err := playwright.Install(&playwright.RunOptions{
+		SkipInstallBrowsers: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not install playwright driver: %v", err)
+	}
+
 	pw, err := playwright.Run()
 	if err != nil {
 		return nil, fmt.Errorf("could not start playwright: %v", err)

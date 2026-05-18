@@ -19,9 +19,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -v -o scraper ./cmd/scraper/main.go
 
 # Stage 2: Final minimal image
-FROM alpine:3.20
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -35,7 +37,7 @@ COPY --from=builder /app/scraper .
 # Actually, the driver is usually embedded or downloaded on first run.
 
 # Create non-root user
-RUN adduser -D -u 10001 appuser && \
+RUN useradd -m -u 10001 appuser && \
     chown appuser:appuser /app/scraper
 
 USER appuser
