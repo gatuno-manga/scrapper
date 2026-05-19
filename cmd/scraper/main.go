@@ -122,6 +122,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			producer.Publish(ctx, cfg.TopicChapterPagesExtracted, models.ScrapingChapterPagesExtracted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
+				TargetBucket: req.UploadTarget.Bucket,
 				ScrapedTitle: title,
 				TotalImages:  len(imageUrls),
 				Images:       intermediateImages,
@@ -186,6 +187,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			producer.Publish(ctx, cfg.TopicChapterCompleted, models.ScrapingChapterCompleted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
+				TargetBucket: req.UploadTarget.Bucket,
 				ScrapedTitle: title,
 				TotalImages:  len(scImages),
 				Images:       scImages,
@@ -304,9 +306,10 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 			// Emit final completion event
 			producer.Publish(ctx, cfg.TopicCoversCompleted, models.ScrapingCoversCompleted{
-				JobID:   req.JobID,
-				BookID:  req.BookID,
-				Results: s3Paths,
+				JobID:        req.JobID,
+				BookID:       req.BookID,
+				TargetBucket: req.UploadTarget.Bucket,
+				Results:      s3Paths,
 			})
 
 			log.Printf("Covers request completed: %s (Processed: %d/%d)", req.JobID, len(s3Paths), len(req.Covers))
@@ -373,11 +376,12 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 			// Emit final completion event for Images batch
 			producer.Publish(ctx, cfg.TopicImagesCompleted, models.ScrapingImagesCompleted{
-				JobID:    req.JobID,
-				EntityID: req.EntityID,
-				Source:   "CHAPTER",
-				Format:   "images",
-				URLMap:   urlMap,
+				JobID:        req.JobID,
+				EntityID:     req.EntityID,
+				TargetBucket: req.UploadTarget.Bucket,
+				Source:       "CHAPTER",
+				Format:       "images",
+				URLMap:       urlMap,
 			})
 
 			log.Printf("Images request completed: %s (Processed: %d/%d)", req.JobID, count, len(req.ImageURLs))

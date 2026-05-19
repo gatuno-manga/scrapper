@@ -66,6 +66,7 @@ type ScrapedImage struct {
 type ScrapingChapterCompleted struct {
 	JobID        string         `json:"jobId"`
 	ChapterID    string         `json:"chapterId"`
+	TargetBucket string         `json:"targetBucket"`
 	ScrapedTitle string         `json:"scrapedTitle"`
 	TotalImages  int            `json:"totalImages"`
 	Images       []ScrapedImage `json:"images"`
@@ -74,6 +75,7 @@ type ScrapingChapterCompleted struct {
 type ScrapingChapterPagesExtracted struct {
 	JobID        string         `json:"jobId"`
 	ChapterID    string         `json:"chapterId"`
+	TargetBucket string         `json:"targetBucket"`
 	ScrapedTitle string         `json:"scrapedTitle"`
 	TotalImages  int            `json:"totalImages"`
 	Images       []ScrapedImage `json:"images"`
@@ -151,9 +153,10 @@ type ScrapingCoversRequest struct {
 }
 
 type ScrapingCoversCompleted struct {
-	JobID   string   `json:"jobId"`
-	BookID  string   `json:"bookId"`
-	Results []string `json:"results"` // S3 Paths (raw)
+	JobID        string   `json:"jobId"`
+	BookID       string   `json:"bookId"`
+	TargetBucket string   `json:"targetBucket"`
+	Results      []string `json:"results"` // S3 Paths (raw)
 }
 
 type ScrapingImagesRequest struct {
@@ -165,10 +168,11 @@ type ScrapingImagesRequest struct {
 }
 
 type ScrapingImagesCompleted struct {
-	JobID    string            `json:"jobId"`
-	EntityID string            `json:"entityId"`
-	Source   string            `json:"source"`
-	Format   string            `json:"format"`
-	URLMap   map[string]string `json:"urlMap"`
+	JobID        string            `json:"jobId"`
+	EntityID     string            `json:"entityId"`
+	TargetBucket string            `json:"targetBucket"`
+	Source       string            `json:"source"`
+	Format       string            `json:"format"`
+	URLMap       map[string]string `json:"urlMap"`
 }
 // test
