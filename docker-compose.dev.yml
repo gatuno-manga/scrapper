@@ -1,7 +1,7 @@
 name: gatuno
 
 services:
-  scraper:
+  scraper-dev:
     build:
       context: .
       dockerfile: Dockerfile.dev
