@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,7 +129,8 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		origCleanup()
 	}
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL); err != nil {
+	interceptedImages := &sync.Map{}
+	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, interceptedImages); err != nil {
 		cleanup()
 		return "", nil, nil, func() {}, err
 	}
@@ -166,7 +168,8 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	imageUrls := make([]string, 0, count)
 	for i := 0; i < count; i++ {
 		img := imageLocators.Nth(i)
-		src, _ := img.GetAttribute("src")
+		srcI, _ := img.Evaluate("node => node.currentSrc || node.src", nil)
+		src, _ := srcI.(string)
 		if src == "" {
 			src, _ = img.GetAttribute("data-src")
 		}
@@ -175,21 +178,15 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		}
 	}
 
-	results := s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, imageUrls)
+	results := s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, imageUrls, interceptedImages)
 	return scrapedTitle, imageUrls, results, cleanup, nil
 }
 
-func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, config models.WebsiteConfig, imageUrls []string) <-chan ImageResult {
+func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, config models.WebsiteConfig, imageUrls []string, interceptedImages *sync.Map) <-chan ImageResult {
 	results := make(chan ImageResult, len(imageUrls))
-	
+
 	go func() {
 		defer close(results)
-		if page != nil {
-			// We only close the page if we are in ScrapeChapter context. 
-			// In other contexts, the caller might manage the page.
-			// However, for simplicity and safety in the new methods, 
-			// we'll handle lifecycle in the higher-level ScrapeX methods.
-		}
 
 		numWorkers := 5
 		if len(imageUrls) < numWorkers {
@@ -218,6 +215,14 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 			go func() {
 				defer wg.Done()
 				for j := range jobs {
+					// 1. Check Network Interception Map
+					if interceptedImages != nil {
+						if data, ok := interceptedImages.Load(j.url); ok {
+							results <- ImageResult{Index: j.index, Data: data.([]byte)}
+							continue
+						}
+					}
+
 					// 2. Rate Limit & Jitter
 					limiter.Wait(ctx)
 					jitter := time.Duration(200+rand.Intn(500)) * time.Millisecond
@@ -252,7 +257,7 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 						}
 					}
 
-					// Fallback to direct download if browser APIRequest not available or failed
+					// 4. Fallback to direct download if browser APIRequest not available or failed
 					var data []byte
 					var dlErr error
 					var success bool
@@ -264,9 +269,33 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 							dlErr = errReq
 							break
 						}
-						
+
+						// Mimic browser headers more closely
 						for k, v := range config.Headers {
 							hReq.Header.Set(k, v)
+						}
+						if hReq.Header.Get("User-Agent") == "" {
+							hReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+						}
+						if hReq.Header.Get("Accept") == "" {
+							hReq.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+						}
+						if hReq.Header.Get("Referer") == "" && page != nil {
+							hReq.Header.Set("Referer", page.URL())
+						}
+						hReq.Header.Set("Sec-Fetch-Dest", "image")
+						hReq.Header.Set("Sec-Fetch-Mode", "no-cors")
+						hReq.Header.Set("Sec-Fetch-Site", "same-origin")
+
+						// Sync cookies from browser context to http client
+						if page != nil {
+							cookies, _ := page.Context().Cookies()
+							for _, c := range cookies {
+								hReq.AddCookie(&http.Cookie{
+									Name:  c.Name,
+									Value: c.Value,
+								})
+							}
 						}
 
 						resp, errResp := client.Do(hReq)
@@ -276,7 +305,7 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 							time.Sleep(time.Duration(attempt+1) * time.Second)
 							continue
 						}
-						
+
 						if resp.StatusCode == http.StatusOK {
 							data, dlErr = io.ReadAll(resp.Body)
 							resp.Body.Close()
@@ -325,7 +354,7 @@ func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdat
 	}
 	defer page.Close()
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL); err != nil {
+	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, nil); err != nil {
 		return models.ScrapingBookCompleted{}, err
 	}
 
@@ -403,7 +432,7 @@ func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookR
 	}
 	defer page.Close()
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL); err != nil {
+	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, nil); err != nil {
 		return models.ScrapingBookCompleted{}, err
 	}
 
@@ -482,7 +511,8 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 		return res, func() {}
 	}
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL); err != nil {
+	interceptedImages := &sync.Map{}
+	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, interceptedImages); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
 		res := make(chan ImageResult, 1)
@@ -496,7 +526,7 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 		imageUrls = append(imageUrls, c.URL)
 	}
 
-	return s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, imageUrls), func() {
+	return s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, imageUrls, interceptedImages), func() {
 		page.Close()
 		s.pool.Release(bCtx)
 	}
@@ -526,7 +556,8 @@ func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesReq
 		targetURL = req.ImageURLs[0]
 	}
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, targetURL); err != nil {
+	interceptedImages := &sync.Map{}
+	if err := s.preparePage(page, bCtx, req.WebsiteConfig, targetURL, interceptedImages); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
 		res := make(chan ImageResult, 1)
@@ -535,7 +566,7 @@ func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesReq
 		return res, func() {}
 	}
 
-	return s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, req.ImageURLs), func() {
+	return s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, req.ImageURLs, interceptedImages), func() {
 		page.Close()
 		s.pool.Release(bCtx)
 	}
@@ -554,44 +585,47 @@ func (s *Scraper) ExecuteTestScript(ctx context.Context, req models.ScrapingTest
 	}
 	defer page.Close()
 
-	// Advanced Stealth Injection
-	page.AddInitScript(playwright.Script{
-		Content: playwright.String(`
-			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-			window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
-			Object.defineProperty(navigator, 'plugins', { get: () => [{ description: 'Portable Document Format', filename: 'internal-pdf-viewer', name: 'Chrome PDF Viewer' }] });
-			Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-			const getParameter = WebGLRenderingContext.prototype.getParameter;
-			WebGLRenderingContext.prototype.getParameter = function(parameter) {
-				if (parameter === 37445) return 'Intel Inc.';
-				if (parameter === 37446) return 'Intel(R) Iris(R) Xe Graphics';
-				return getParameter.apply(this, arguments);
-			};
-		`),
-	})
-
-	_, err = page.Goto(req.TargetURL, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateLoad,
-	})
-	if err != nil {
+	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, nil); err != nil {
 		return nil, err
 	}
 
 	return page.Evaluate(req.Script)
 }
 
-func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserContext, config models.WebsiteConfig, targetURL string) error {
-	// Add console listener
+func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserContext, config models.WebsiteConfig, targetURL string, interceptedImages *sync.Map) error {
+	// Add console listener with noise filtering
 	page.On("console", func(msg playwright.ConsoleMessage) {
-		log.Printf("Browser console (%s): %s", targetURL, msg.Text())
+		text := msg.Text()
+		// Filter noisy/irrelevant logs
+		if strings.Contains(text, "Third-party cookie") ||
+			strings.Contains(text, "Failed to load resource") ||
+			strings.Contains(text, "net::ERR_CONNECTION_RESET") ||
+			strings.Contains(text, "status of 404") {
+			return
+		}
+		log.Printf("Browser console (%s): %s", targetURL, text)
 	})
+
+	// Network Interception
+	if config.UseNetworkInterception && interceptedImages != nil {
+		page.On("response", func(resp playwright.Response) {
+			go func(r playwright.Response) {
+				if r.Request().ResourceType() == "image" && r.Status() == 200 {
+					body, err := r.Body()
+					if err == nil {
+						interceptedImages.Store(r.URL(), body)
+					}
+				}
+			}(resp)
+		})
+	}
 
 	// Advanced Stealth Injection
 	page.AddInitScript(playwright.Script{
 		Content: playwright.String(`
 			// 1. Hide Webdriver
 			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-			
+
 			// 2. Mock Chrome runtime
 			window.chrome = {
 				runtime: {},
@@ -627,20 +661,34 @@ func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserConte
 		page.SetExtraHTTPHeaders(config.Headers)
 	}
 
-	// Inject Cookies
+	// Inject Cookies with enhanced attributes
 	if len(config.Cookies) > 0 {
 		var playwrightCookies []playwright.OptionalCookie
 		for _, c := range config.Cookies {
-			playwrightCookies = append(playwrightCookies, playwright.OptionalCookie{
+			path := c.Path
+			if path == "" {
+				path = "/"
+			}
+			cookie := playwright.OptionalCookie{
 				Name:   c.Name,
 				Value:  c.Value,
 				Domain: playwright.String(c.Domain),
-				Path:   playwright.String("/"),
-			})
+				Path:   playwright.String(path),
+			}
+			if c.HttpOnly {
+				cookie.HttpOnly = playwright.Bool(true)
+			}
+			if c.Secure {
+				cookie.Secure = playwright.Bool(true)
+			}
+			if c.SameSite != "" {
+				ss := playwright.SameSiteAttribute(c.SameSite)
+				cookie.SameSite = &ss
+			}
+			playwrightCookies = append(playwrightCookies, cookie)
 		}
 		bCtx.AddCookies(playwrightCookies)
 	}
-
 	timeout := 60000.0
 	if config.EnableAdaptiveTimeouts && config.TimeoutMultipliers.Medium > 0 {
 		timeout *= config.TimeoutMultipliers.Medium
@@ -648,15 +696,18 @@ func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserConte
 
 	log.Printf("Navigating to: %s", targetURL)
 	_, err := page.Goto(targetURL, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateLoad,
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(timeout),
 	})
 	if err != nil {
+		log.Printf("Navigation failed for %s: %v", targetURL, err)
 		return err
 	}
+	log.Printf("Navigation completed for %s", targetURL)
 
 	// Injection of LocalStorage/SessionStorage
 	if len(config.LocalStorage) > 0 || len(config.SessionStorage) > 0 {
+		log.Printf("Injecting storage for %s", targetURL)
 		storageScript := `(data) => {
 			for (const [k, v] of Object.entries(data.local || {})) {
 				const val = typeof v === 'string' ? v : JSON.stringify(v);
@@ -672,29 +723,32 @@ func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserConte
 			"session": config.SessionStorage,
 		})
 		if config.ReloadAfterStorageInjection {
+			log.Printf("Reloading page after storage injection for %s", targetURL)
 			page.Reload()
 		}
 	}
 
 	if config.CloudflareBypass {
-		log.Printf("Cloudflare bypass enabled, waiting 5s...")
+		log.Printf("Cloudflare bypass enabled, waiting 5s for %s...", targetURL)
 		time.Sleep(5 * time.Second)
 	}
 
 	// Handle age confirmation popup for SPAs if script is provided
 	if config.PreScript != "" {
-		log.Printf("Executing PreScript...")
+		log.Printf("Executing PreScript for %s...", targetURL)
 		if _, err := page.Evaluate(config.PreScript); err != nil {
-			log.Printf("WARNING: PreScript execution failed: %v", err)
+			log.Printf("WARNING: PreScript execution failed for %s: %v", targetURL, err)
 		}
 		// Wait for DOM to react (critical for SPAs)
 		time.Sleep(5 * time.Second)
 	} else {
 		// Default wait for SPAs
+		log.Printf("Waiting 3s for SPA/JS initialization for %s...", targetURL)
 		time.Sleep(3 * time.Second)
 	}
 
 	// Basic scroll to trigger lazy-loading
+	log.Printf("Performing initial triggers/scrolls for %s", targetURL)
 	if _, err := page.Evaluate(`window.scrollTo(0, document.body.scrollHeight/2)`); err != nil {
 		log.Printf("WARNING: Scroll (half) failed: %v", err)
 	}

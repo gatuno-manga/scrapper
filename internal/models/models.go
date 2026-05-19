@@ -21,9 +21,13 @@ type WebsiteConfig struct {
 }
 
 type Cookie struct {
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	Domain string `json:"domain"`
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Domain   string `json:"domain"`
+	Path     string `json:"path"`
+	HttpOnly bool   `json:"httpOnly"`
+	Secure   bool   `json:"secure"`
+	SameSite string `json:"sameSite"`
 }
 
 type TimeoutMultipliers struct {
@@ -91,9 +95,10 @@ type ImageProcessingRequested struct {
 }
 
 type ScrapingTestRequest struct {
-	TargetURL       string `json:"targetUrl"`
-	Script          string `json:"script"`
-	UseFlareSolverr bool   `json:"useFlareSolverr"`
+	TargetURL       string        `json:"targetUrl"`
+	Script          string        `json:"script"`
+	UseFlareSolverr bool          `json:"useFlareSolverr"`
+	WebsiteConfig   WebsiteConfig `json:"websiteConfig"`
 }
 
 type ScrapingUpdateBookRequest struct {
