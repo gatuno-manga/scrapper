@@ -42,6 +42,11 @@ type Config struct {
 	TopicUpdateBookCompleted string
 	TopicCoversCompleted  string
 	TopicImagesCompleted  string
+	TopicDLQ             string // dead-letter queue for unprocessable messages
+	TopicBookFailed      string // failure events for new-book and update-book jobs
+
+	// Storage
+	ProcessedImagesBucket string // bucket where post-processed images land
 	}
 
 
@@ -114,6 +119,9 @@ func LoadConfig() Config {
 		TopicUpdateBookCompleted: getEnv("TOPIC_UPDATE_BOOK_COMPLETED", "scraping.update-book.completed"),
 		TopicCoversCompleted:  getEnv("TOPIC_COVERS_COMPLETED", "scraping.covers.completed"),
 		TopicImagesCompleted:  getEnv("TOPIC_IMAGES_COMPLETED", "scraping.images.completed"),
+		TopicDLQ:             getEnv("TOPIC_DLQ", "scraping.dlq"),
+		TopicBookFailed:      getEnv("TOPIC_BOOK_FAILED", "scraping.book.failed"),
+		ProcessedImagesBucket: getEnv("PROCESSED_IMAGES_BUCKET", "books"),
 	}
 }
 

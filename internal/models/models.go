@@ -175,4 +175,20 @@ type ScrapingImagesCompleted struct {
 	Format       string            `json:"format"`
 	URLMap       map[string]string `json:"urlMap"`
 }
-// test
+
+// DeadLetterMessage is published to the DLQ topic when a message cannot be
+// deserialized or routed. It preserves the original payload for debugging.
+type DeadLetterMessage struct {
+	OriginalTopic string `json:"originalTopic"`
+	Payload       string `json:"payload"`
+	Error         string `json:"error"`
+}
+
+// ScrapingBookFailed is published when a new-book or update-book scrape job fails,
+// allowing upstream services to react (e.g. retry or mark the job as failed).
+type ScrapingBookFailed struct {
+	JobID   string `json:"jobId"`
+	BookID  string `json:"bookId,omitempty"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}

@@ -17,6 +17,7 @@ type CachedImage struct {
 	TempPath    string
 	ContentType string
 	LastAccess  time.Time
+	Size        int64 // stored at Put() time; Data may be nil for temp-file offloads
 }
 
 type NetworkInterceptor struct {
@@ -158,6 +159,7 @@ func (ni *NetworkInterceptor) Put(url string, data []byte, contentType string) {
 		TempPath:    tempPath,
 		ContentType: contentType,
 		LastAccess:  time.Now(),
+		Size:        size, // always the original size, even when Data is nil
 	}
 
 	ent := ni.lru.PushFront(img)
@@ -214,7 +216,6 @@ func (ni *NetworkInterceptor) evict() {
 	}
 
 	img := ent.Value.(*CachedImage)
-	size := int64(len(img.Data))
 	if img.TempPath != "" {
 		os.Remove(img.TempPath)
 		// We should also remove it from ni.tempFiles but that's slow to find.
@@ -223,7 +224,9 @@ func (ni *NetworkInterceptor) evict() {
 
 	ni.lru.Remove(ent)
 	delete(ni.cache, img.URL)
-	ni.currentSize -= size
+	// Use the stored size (not len(img.Data)) so eviction is correct for
+	// images that were offloaded to disk (where img.Data is nil).
+	ni.currentSize -= img.Size
 }
 
 func (ni *NetworkInterceptor) Clear() {

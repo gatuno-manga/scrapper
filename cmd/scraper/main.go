@@ -71,37 +71,77 @@ func main() {
 	go handleNewBookRequests(ctx, newBookConsumer, producer, engine, cfg)
 	go handleCoversRequests(ctx, coversConsumer, producer, engine, s3, cfg)
 	go handleImagesRequests(ctx, imagesConsumer, producer, engine, s3, cfg)
-	go handleTestRequests(ctx, testConsumer, producer, engine)
+	go handleTestRequests(ctx, testConsumer, engine)
 
 	<-ctx.Done()
 	log.Println("Shutting down...")
 }
 
+// publishOrLog publishes a message to a Kafka topic and logs a critical error
+// if delivery fails. Call sites must NOT silently discard the error.
+func publishOrLog(ctx context.Context, producer *kafka.Producer, topic string, msg interface{}) {
+	if err := producer.Publish(ctx, topic, msg); err != nil {
+		log.Printf("CRITICAL: failed to publish to topic %s: %v", topic, err)
+	}
+}
+
+// sendToDLQ routes an unprocessable message to the dead-letter queue topic so
+// it can be inspected and replayed later without blocking the main consumer.
+func sendToDLQ(ctx context.Context, producer *kafka.Producer, dlqTopic, originalTopic string, payload []byte, reason error) {
+	dlqMsg := models.DeadLetterMessage{
+		OriginalTopic: originalTopic,
+		Payload:       string(payload),
+		Error:         reason.Error(),
+	}
+	if err := producer.Publish(ctx, dlqTopic, dlqMsg); err != nil {
+		log.Printf("CRITICAL: failed to send message to DLQ %s: %v (original error: %v)", dlqTopic, err, reason)
+	}
+}
+
+// commitOrLog commits a Kafka message offset and logs a critical error on failure.
+func commitOrLog(ctx context.Context, consumer *kafka.Consumer, msg kafka.Message) {
+	if err := consumer.Commit(ctx, msg); err != nil {
+		log.Printf("CRITICAL: failed to commit Kafka offset: %v", err)
+	}
+}
+
 func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
-	// Semaphore to limit concurrency (matching browser pool size roughly)
-	sem := make(chan struct{}, 5) 
+	// Semaphore size mirrors the browser pool so we don't spawn more concurrent
+	// scraping goroutines than there are available browser contexts.
+	sem := make(chan struct{}, cfg.BrowserPoolSize)
 
 	for {
-		var req models.ScrapingChapterRequest
-		_, err := consumer.FetchMessage(ctx, &req)
+		msg, err := consumer.Fetch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("Error fetching message: %v", err)
+			log.Printf("Error fetching chapter message: %v", err)
+			continue
+		}
+
+		var req models.ScrapingChapterRequest
+		if err := json.Unmarshal(msg.Value, &req); err != nil {
+			log.Printf("Error deserializing chapter message: %v | Raw: %s", err, string(msg.Value))
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicChapterRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
 			continue
 		}
 
 		sem <- struct{}{} // Acquire slot
-		go func(req models.ScrapingChapterRequest) {
+		go func(req models.ScrapingChapterRequest, msg kafka.Message) {
 			defer func() { <-sem }() // Release slot
+			// Commit the offset after the goroutine finishes (at-least-once).
+			// Note: with concurrent goroutines, out-of-order commits are possible;
+			// a message processed later might commit a higher offset first.
+			defer commitOrLog(ctx, consumer, msg)
 
 			log.Printf("Processing chapter request: %s (Job: %s)", req.ChapterID, req.JobID)
 
 			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(ctx, req)
 			if err != nil {
 				log.Printf("Scrape failed: %v", err)
-				producer.Publish(ctx, cfg.TopicChapterFailed, models.ScrapingChapterFailed{
+				publishOrLog(ctx, producer, cfg.TopicChapterFailed, models.ScrapingChapterFailed{
 					JobID:     req.JobID,
 					ChapterID: req.ChapterID,
 					Error:     "SCRAPE_FAILED",
@@ -119,7 +159,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				})
 			}
 
-			producer.Publish(ctx, cfg.TopicChapterPagesExtracted, models.ScrapingChapterPagesExtracted{
+			publishOrLog(ctx, producer, cfg.TopicChapterPagesExtracted, models.ScrapingChapterPagesExtracted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
 				TargetBucket: req.UploadTarget.Bucket,
@@ -127,6 +167,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				TotalImages:  len(imageUrls),
 				Images:       intermediateImages,
 			})
+
 			type processedImage struct {
 				Index int
 				Image models.ScrapedImage
@@ -146,17 +187,17 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				log.Printf("Attempting upload (index %d): bucket=%s, object=%s, size=%d bytes", r.Index, req.UploadTarget.Bucket, rawName, len(r.Data))
-				_, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg")
-				if err != nil {
+				if _, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
 					log.Printf("Upload failed (index %d): %v", r.Index, err)
+					r.Data = nil
 					continue
 				}
 
 				// Publish image processing request IMMEDIATELY
-				producer.Publish(ctx, cfg.TopicImageProcessing, models.ImageProcessingRequested{
+				publishOrLog(ctx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
 					RawBucket:    req.UploadTarget.Bucket,
 					RawPath:      rawName,
-					TargetBucket: "books",
+					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
 				})
@@ -184,7 +225,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				scImages = append(scImages, pi.Image)
 			}
 
-			producer.Publish(ctx, cfg.TopicChapterCompleted, models.ScrapingChapterCompleted{
+			publishOrLog(ctx, producer, cfg.TopicChapterCompleted, models.ScrapingChapterCompleted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
 				TargetBucket: req.UploadTarget.Bucket,
@@ -192,17 +233,16 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				TotalImages:  len(scImages),
 				Images:       scImages,
 			})
-			
+
 			log.Printf("Chapter completed: %s", req.ChapterID)
-		}(req)
+		}(req, msg)
 	}
 }
 
 func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicUpdateBookRequested)
 	for {
-		var req models.ScrapingUpdateBookRequest
-		_, err := consumer.FetchMessage(ctx, &req)
+		msg, err := consumer.Fetch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -211,23 +251,38 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 			continue
 		}
 
+		var req models.ScrapingUpdateBookRequest
+		if err := json.Unmarshal(msg.Value, &req); err != nil {
+			log.Printf("Error deserializing update-book message: %v | Raw: %s", err, string(msg.Value))
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
+			continue
+		}
+
 		log.Printf("Processing update-book request: %s (Job: %s)", req.BookID, req.JobID)
 		result, err := engine.ScrapeUpdateBook(ctx, req)
 		if err != nil {
 			log.Printf("Update book scrape failed: %v", err)
+			publishOrLog(ctx, producer, cfg.TopicBookFailed, models.ScrapingBookFailed{
+				JobID:   req.JobID,
+				BookID:  req.BookID,
+				Error:   "SCRAPE_FAILED",
+				Message: err.Error(),
+			})
+			commitOrLog(ctx, consumer, msg)
 			continue
 		}
 
-		producer.Publish(ctx, cfg.TopicUpdateBookCompleted, result)
+		publishOrLog(ctx, producer, cfg.TopicUpdateBookCompleted, result)
 		log.Printf("Update book completed: %s", req.BookID)
+		commitOrLog(ctx, consumer, msg)
 	}
 }
 
 func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicNewBookRequested)
 	for {
-		var req models.ScrapingNewBookRequest
-		_, err := consumer.FetchMessage(ctx, &req)
+		msg, err := consumer.Fetch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -236,22 +291,37 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			continue
 		}
 
+		var req models.ScrapingNewBookRequest
+		if err := json.Unmarshal(msg.Value, &req); err != nil {
+			log.Printf("Error deserializing new-book message: %v | Raw: %s", err, string(msg.Value))
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicNewBookRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
+			continue
+		}
+
 		log.Printf("Processing new-book request (Job: %s)", req.JobID)
 		result, err := engine.ScrapeNewBook(ctx, req)
 		if err != nil {
 			log.Printf("New book scrape failed: %v", err)
+			publishOrLog(ctx, producer, cfg.TopicBookFailed, models.ScrapingBookFailed{
+				JobID:   req.JobID,
+				Error:   "SCRAPE_FAILED",
+				Message: err.Error(),
+			})
+			commitOrLog(ctx, consumer, msg)
 			continue
 		}
 
-		producer.Publish(ctx, cfg.TopicBookCompleted, result)
+		publishOrLog(ctx, producer, cfg.TopicBookCompleted, result)
 		log.Printf("New book completed (Job: %s)", req.JobID)
+		commitOrLog(ctx, consumer, msg)
 	}
 }
 
 func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicCoversRequested)
 	for {
-		msg, err := consumer.ReadRawMessage(ctx)
+		msg, err := consumer.Fetch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -263,15 +333,19 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 		var req models.ScrapingCoversRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
 			log.Printf("Error unmarshaling covers message: %v | Raw: %s", err, string(msg.Value))
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicCoversRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
 			continue
 		}
 
 		log.Printf("Processing covers request: %s (Job: %s, Covers: %d)", req.BookID, req.JobID, len(req.Covers))
 
-		go func(req models.ScrapingCoversRequest) {
+		go func(req models.ScrapingCoversRequest, msg kafka.Message) {
+			defer commitOrLog(ctx, consumer, msg)
+
 			results, cleanup := engine.ScrapeCovers(ctx, req)
 			defer cleanup()
-			
+
 			s3Paths := make([]string, 0, len(req.Covers))
 			for r := range results {
 				if r.Error != nil {
@@ -279,23 +353,23 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 					continue
 				}
 
-				// Path pattern: books/<prefix>/<uuid>.jpg
+				// Path pattern: <prefix>/<shard>/<uuid>.jpg
 				id, _ := uuid.NewV7()
 				imgID := id.String()
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
-				_, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg")
-				if err != nil {
+				if _, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
 					log.Printf("Cover upload failed: %v", err)
+					r.Data = nil
 					continue
 				}
 
 				s3Paths = append(s3Paths, rawName)
 
-				producer.Publish(ctx, cfg.TopicImageProcessing, models.ImageProcessingRequested{
+				publishOrLog(ctx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
 					RawBucket:    req.UploadTarget.Bucket,
 					RawPath:      rawName,
-					TargetBucket: "books",
+					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
 				})
@@ -305,7 +379,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			}
 
 			// Emit final completion event
-			producer.Publish(ctx, cfg.TopicCoversCompleted, models.ScrapingCoversCompleted{
+			publishOrLog(ctx, producer, cfg.TopicCoversCompleted, models.ScrapingCoversCompleted{
 				JobID:        req.JobID,
 				BookID:       req.BookID,
 				TargetBucket: req.UploadTarget.Bucket,
@@ -313,14 +387,14 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			})
 
 			log.Printf("Covers request completed: %s (Processed: %d/%d)", req.JobID, len(s3Paths), len(req.Covers))
-		}(req)
+		}(req, msg)
 	}
 }
 
 func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicImagesRequested)
 	for {
-		msg, err := consumer.ReadRawMessage(ctx)
+		msg, err := consumer.Fetch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -332,15 +406,19 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 		var req models.ScrapingImagesRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
 			log.Printf("Error unmarshaling images message: %v | Raw: %s", err, string(msg.Value))
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicImagesRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
 			continue
 		}
 
 		log.Printf("Processing images request (Job: %s, Images: %d)", req.JobID, len(req.ImageURLs))
 
-		go func(req models.ScrapingImagesRequest) {
+		go func(req models.ScrapingImagesRequest, msg kafka.Message) {
+			defer commitOrLog(ctx, consumer, msg)
+
 			results, cleanup := engine.ScrapeImages(ctx, req)
 			defer cleanup()
-			
+
 			urlMap := make(map[string]string)
 			count := 0
 			for r := range results {
@@ -353,16 +431,16 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 				imgID := id.String()
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
-				_, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg")
-				if err != nil {
+				if _, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
 					log.Printf("Image upload failed: %v", err)
+					r.Data = nil
 					continue
 				}
 
-				producer.Publish(ctx, cfg.TopicImageProcessing, models.ImageProcessingRequested{
+				publishOrLog(ctx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
 					RawBucket:    req.UploadTarget.Bucket,
 					RawPath:      rawName,
-					TargetBucket: "books",
+					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
 				})
@@ -375,7 +453,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			}
 
 			// Emit final completion event for Images batch
-			producer.Publish(ctx, cfg.TopicImagesCompleted, models.ScrapingImagesCompleted{
+			publishOrLog(ctx, producer, cfg.TopicImagesCompleted, models.ScrapingImagesCompleted{
 				JobID:        req.JobID,
 				EntityID:     req.EntityID,
 				TargetBucket: req.UploadTarget.Bucket,
@@ -385,30 +463,44 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			})
 
 			log.Printf("Images request completed: %s (Processed: %d/%d)", req.JobID, count, len(req.ImageURLs))
-		}(req)
+		}(req, msg)
 	}
 }
 
-func handleTestRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper) {
+func handleTestRequests(ctx context.Context, consumer *kafka.Consumer, engine *scraper.Scraper) {
 	for {
 		var req models.ScrapingTestRequest
-		_, err := consumer.FetchMessage(ctx, &req)
+		msg, err := consumer.FetchMessage(ctx, &req)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("Error fetching message: %v", err)
+			log.Printf("Error fetching test message: %v", err)
 			continue
 		}
 
 		res, err := engine.ExecuteTestScript(ctx, req)
 		log.Printf("Test Result: %v (Error: %v)", res, err)
+
+		// Commit after execution regardless of result, test jobs are best-effort.
+		commitOrLog(ctx, consumer, msg)
 	}
 }
 
+// generateS3Keys builds the raw and processed S3 object paths for an image.
+// The path uses the last 2 characters of the UUID as a shard prefix to avoid
+// hot-spotting in object storage, and honours pathPrefix when set.
+//
+//   - rawName:    "<pathPrefix>/<shard>/<uuid>.jpg"  (uploaded immediately)
+//   - targetName: "<pathPrefix>/<shard>/<uuid>.webp" (written by the image processor)
 func generateS3Keys(pathPrefix, imgID string) (rawName string, targetName string) {
-	prefix := imgID[len(imgID)-2:]
-	rawName = fmt.Sprintf("%s/%s.jpg", prefix, imgID)
-	targetName = fmt.Sprintf("%s/%s.webp", prefix, imgID)
+	shard := imgID[len(imgID)-2:]
+	if pathPrefix != "" {
+		rawName = fmt.Sprintf("%s/%s/%s.jpg", pathPrefix, shard, imgID)
+		targetName = fmt.Sprintf("%s/%s/%s.webp", pathPrefix, shard, imgID)
+	} else {
+		rawName = fmt.Sprintf("%s/%s.jpg", shard, imgID)
+		targetName = fmt.Sprintf("%s/%s.webp", shard, imgID)
+	}
 	return rawName, targetName
 }

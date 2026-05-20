@@ -207,7 +207,6 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 		close(jobs)
 
 		var wg sync.WaitGroup
-		limiter := s.getLimiter("global") // Default domain for batch
 		client := &http.Client{Timeout: 30 * time.Second}
 
 		for w := 0; w < numWorkers; w++ {
@@ -223,8 +222,8 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 						}
 					}
 
-					// 2. Rate Limit & Jitter
-					limiter.Wait(ctx)
+					// 2. Rate Limit per domain & Jitter
+					s.getLimiter(j.url).Wait(ctx)
 					jitter := time.Duration(200+rand.Intn(500)) * time.Millisecond
 					time.Sleep(jitter)
 
@@ -341,7 +340,19 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 	return results
 }
 
-func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdateBookRequest) (models.ScrapingBookCompleted, error) {
+// bookScrapeInput bundles the parameters required by scrapeBookPage.
+type bookScrapeInput struct {
+	JobID         string
+	BookID        string
+	TargetURL     string
+	WebsiteConfig models.WebsiteConfig
+	Script        string
+}
+
+// scrapeBookPage is the shared implementation for ScrapeUpdateBook and ScrapeNewBook.
+// It acquires a browser context, navigates to the page, evaluates the extraction
+// script and returns a parsed ScrapingBookCompleted result.
+func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (models.ScrapingBookCompleted, error) {
 	bCtx, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return models.ScrapingBookCompleted{}, err
@@ -354,47 +365,38 @@ func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdat
 	}
 	defer page.Close()
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, nil); err != nil {
+	if err := s.preparePage(page, bCtx, in.WebsiteConfig, in.TargetURL, nil); err != nil {
 		return models.ScrapingBookCompleted{}, err
 	}
 
-	// Execute PosScript
-	if req.WebsiteConfig.PosScript != "" {
-		page.Evaluate(req.WebsiteConfig.PosScript)
+	// Execute PosScript and allow DOM to settle
+	if in.WebsiteConfig.PosScript != "" {
+		page.Evaluate(in.WebsiteConfig.PosScript)
 		time.Sleep(2 * time.Second)
 	}
 
 	// Final wait before extraction
 	time.Sleep(2 * time.Second)
 
-	extractScript := req.BookInfoExtractScript
-	if extractScript == "" {
-		extractScript = req.Script
-	}
-	if extractScript == "" {
-		extractScript = req.WebsiteConfig.Selectors.BookInfoExtractScript
+	if in.Script == "" {
+		return models.ScrapingBookCompleted{}, fmt.Errorf("extract script is empty")
 	}
 
-	if extractScript == "" {
-		return models.ScrapingBookCompleted{}, fmt.Errorf("BookInfoExtractScript is empty")
-	}
-
-	// We use page.Evaluate directly on the script. Playwright handles both sync and async return values.
-	res, err := page.Evaluate(extractScript)
+	res, err := page.Evaluate(in.Script)
 	if err != nil {
-		log.Printf("ERROR: Script evaluation failed for %s: %v", req.TargetURL, err)
+		log.Printf("ERROR: Script evaluation failed for %s: %v", in.TargetURL, err)
 		return models.ScrapingBookCompleted{}, err
 	}
 
 	data, err := json.Marshal(res)
 	if err != nil {
-		log.Printf("ERROR: Failed to marshal script result for %s: %v", req.TargetURL, err)
+		log.Printf("ERROR: Failed to marshal script result for %s: %v", in.TargetURL, err)
 		return models.ScrapingBookCompleted{}, err
 	}
 
 	var result models.ScrapingBookCompleted
 	if err := json.Unmarshal(data, &result); err != nil {
-		log.Printf("ERROR: Failed to unmarshal script result for %s: %v. Raw data: %s", req.TargetURL, err, string(data))
+		log.Printf("ERROR: Failed to unmarshal script result for %s: %v. Raw: %s", in.TargetURL, err, string(data))
 		return models.ScrapingBookCompleted{}, err
 	}
 
@@ -404,92 +406,60 @@ func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdat
 	}
 
 	if len(result.Chapters) == 0 {
-		log.Printf("WARNING: No chapters extracted for %s. Page Title: %s", req.TargetURL, result.Title)
-		// Log a bit of the body to debug
+		log.Printf("WARNING: No chapters extracted for %s. Page Title: %s", in.TargetURL, result.Title)
 		bodySnippet, _ := page.Evaluate(`document.body.innerText.substring(0, 500)`)
 		log.Printf("Page Body Snippet: %v", bodySnippet)
 	}
 
-	log.Printf("Book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, len(result.Chapters), len(result.Covers))
-
-	result.JobID = req.JobID
-	result.BookID = req.BookID
-	result.TargetURL = req.TargetURL
+	result.JobID = in.JobID
+	result.BookID = in.BookID
+	result.TargetURL = in.TargetURL
 
 	return result, nil
 }
 
+func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdateBookRequest) (models.ScrapingBookCompleted, error) {
+	script := req.BookInfoExtractScript
+	if script == "" {
+		script = req.Script
+	}
+	if script == "" {
+		script = req.WebsiteConfig.Selectors.BookInfoExtractScript
+	}
+
+	result, err := s.scrapeBookPage(ctx, bookScrapeInput{
+		JobID:         req.JobID,
+		BookID:        req.BookID,
+		TargetURL:     req.TargetURL,
+		WebsiteConfig: req.WebsiteConfig,
+		Script:        script,
+	})
+	if err != nil {
+		return result, err
+	}
+	log.Printf("Book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, len(result.Chapters), len(result.Covers))
+	return result, nil
+}
+
 func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookRequest) (models.ScrapingBookCompleted, error) {
-	bCtx, err := s.pool.Acquire(ctx)
+	script := req.NewBookExtractScript
+	if script == "" {
+		script = req.Script
+	}
+	if script == "" {
+		script = req.WebsiteConfig.Selectors.NewBookExtractScript
+	}
+
+	result, err := s.scrapeBookPage(ctx, bookScrapeInput{
+		JobID:         req.JobID,
+		TargetURL:     req.TargetURL,
+		WebsiteConfig: req.WebsiteConfig,
+		Script:        script,
+	})
 	if err != nil {
-		return models.ScrapingBookCompleted{}, err
+		return result, err
 	}
-	defer s.pool.Release(bCtx)
-
-	page, err := bCtx.NewPage()
-	if err != nil {
-		return models.ScrapingBookCompleted{}, err
-	}
-	defer page.Close()
-
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, nil); err != nil {
-		return models.ScrapingBookCompleted{}, err
-	}
-
-	// Execute PosScript
-	if req.WebsiteConfig.PosScript != "" {
-		page.Evaluate(req.WebsiteConfig.PosScript)
-		time.Sleep(2 * time.Second)
-	}
-
-	// Final wait before extraction
-	time.Sleep(2 * time.Second)
-
-	extractScript := req.NewBookExtractScript
-	if extractScript == "" {
-		extractScript = req.Script
-	}
-	if extractScript == "" {
-		extractScript = req.WebsiteConfig.Selectors.NewBookExtractScript
-	}
-
-	if extractScript == "" {
-		return models.ScrapingBookCompleted{}, fmt.Errorf("NewBookExtractScript is empty")
-	}
-
-	// We use page.Evaluate directly on the script. Playwright handles both sync and async return values.
-	res, err := page.Evaluate(extractScript)
-	if err != nil {
-		return models.ScrapingBookCompleted{}, err
-	}
-
-	data, err := json.Marshal(res)
-	if err != nil {
-		return models.ScrapingBookCompleted{}, err
-	}
-
-	var result models.ScrapingBookCompleted
-	if err := json.Unmarshal(data, &result); err != nil {
-		return models.ScrapingBookCompleted{}, err
-	}
-
-	// Fallback for Title
-	if result.Title == "" {
-		result.Title, _ = page.Title()
-	}
-
-	if len(result.Chapters) == 0 {
-		log.Printf("WARNING: No chapters extracted for %s. Page Title: %s", req.TargetURL, result.Title)
-		// Log a bit of the body to debug
-		bodySnippet, _ := page.Evaluate(`document.body.innerText.substring(0, 500)`)
-		log.Printf("Page Body Snippet: %v", bodySnippet)
-	}
-
 	log.Printf("New book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, len(result.Chapters), len(result.Covers))
-
-	result.JobID = req.JobID
-	result.TargetURL = req.TargetURL
-
 	return result, nil
 }
 
