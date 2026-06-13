@@ -42,22 +42,22 @@ func main() {
 	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks)
 	defer producer.Close()
 
-	chapterConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID, cfg.TopicChapterRequested, cfg.KafkaReadTimeout)
+	chapterConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-chapter", cfg.TopicChapterRequested, cfg.KafkaReadTimeout)
 	defer chapterConsumer.Close()
 
-	updateBookConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID, cfg.TopicUpdateBookRequested, cfg.KafkaReadTimeout)
+	updateBookConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-updatebook", cfg.TopicUpdateBookRequested, cfg.KafkaReadTimeout)
 	defer updateBookConsumer.Close()
 
-	newBookConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID, cfg.TopicNewBookRequested, cfg.KafkaReadTimeout)
+	newBookConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-newbook", cfg.TopicNewBookRequested, cfg.KafkaReadTimeout)
 	defer newBookConsumer.Close()
 
-	coversConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID, cfg.TopicCoversRequested, cfg.KafkaReadTimeout)
+	coversConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-covers", cfg.TopicCoversRequested, cfg.KafkaReadTimeout)
 	defer coversConsumer.Close()
 
-	imagesConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID, cfg.TopicImagesRequested, cfg.KafkaReadTimeout)
+	imagesConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-images", cfg.TopicImagesRequested, cfg.KafkaReadTimeout)
 	defer imagesConsumer.Close()
 
-	testConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID, cfg.TopicTestRequested, cfg.KafkaReadTimeout)
+	testConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-test", cfg.TopicTestRequested, cfg.KafkaReadTimeout)
 	defer testConsumer.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -106,10 +106,6 @@ func commitOrLog(ctx context.Context, consumer *kafka.Consumer, msg kafka.Messag
 }
 
 func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
-	// Semaphore size mirrors the browser pool so we don't spawn more concurrent
-	// scraping goroutines than there are available browser contexts.
-	sem := make(chan struct{}, cfg.BrowserPoolSize)
-
 	for {
 		msg, err := consumer.Fetch(ctx)
 		if err != nil {
@@ -128,12 +124,9 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			continue
 		}
 
-		sem <- struct{}{} // Acquire slot
-		go func(req models.ScrapingChapterRequest, msg kafka.Message) {
-			defer func() { <-sem }() // Release slot
-			// Commit the offset after the goroutine finishes (at-least-once).
-			// Note: with concurrent goroutines, out-of-order commits are possible;
-			// a message processed later might commit a higher offset first.
+		func(req models.ScrapingChapterRequest, msg kafka.Message) {
+			// Commit the offset after the processing finishes (at-least-once).
+			// By doing this synchronously, we guarantee offsets advance strictly in order.
 			defer commitOrLog(ctx, consumer, msg)
 
 			log.Printf("Processing chapter request: %s (Job: %s)", req.ChapterID, req.JobID)
@@ -340,7 +333,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		log.Printf("Processing covers request: %s (Job: %s, Covers: %d)", req.BookID, req.JobID, len(req.Covers))
 
-		go func(req models.ScrapingCoversRequest, msg kafka.Message) {
+		func(req models.ScrapingCoversRequest, msg kafka.Message) {
 			defer commitOrLog(ctx, consumer, msg)
 
 			results, cleanup := engine.ScrapeCovers(ctx, req)
@@ -413,7 +406,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		log.Printf("Processing images request (Job: %s, Images: %d)", req.JobID, len(req.ImageURLs))
 
-		go func(req models.ScrapingImagesRequest, msg kafka.Message) {
+		func(req models.ScrapingImagesRequest, msg kafka.Message) {
 			defer commitOrLog(ctx, consumer, msg)
 
 			results, cleanup := engine.ScrapeImages(ctx, req)
