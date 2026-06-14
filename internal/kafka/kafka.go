@@ -79,7 +79,6 @@ func NewConsumer(brokers []string, groupID, topic string, readTimeout int) *Cons
 			Brokers:     brokers,
 			GroupID:     groupID,
 			Topic:       topic,
-			StartOffset: kafka.FirstOffset,
 			MaxWait:     time.Duration(readTimeout) * time.Second,
 		}),
 	}
