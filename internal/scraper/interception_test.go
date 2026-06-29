@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gatuno/scraper/internal/models"
+	"github.com/gatuno/scraper/internal/ratelimit"
 )
 
 func TestScraper_CookieInjectionAdvanced(t *testing.T) {
@@ -37,40 +38,39 @@ func TestScraper_CookieInjectionAdvanced(t *testing.T) {
 	}
 	defer pool.Close()
 	
-	engine := NewScraper(pool, 1024*1024)
+	limiter := ratelimit.NewMemoryRateLimiter()
+	semaphore := ratelimit.NewMemorySemaphore(2)
+	engine := NewScraper(pool, 1024*1024, limiter, semaphore)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	req := models.ScrapingChapterRequest{
+	req := models.ScrapingNewBookRequest{
 		TargetURL: ts.URL,
-		WebsiteConfig: models.WebsiteConfig{
-			Cookies: []models.Cookie{
-				{
-					Name:     "advanced",
-					Value:    "attributes",
-					Domain:   "127.0.0.1",
-					Path:     "/",
-					HttpOnly: true,
-					Secure:   false, // Local httptest is usually HTTP
-					SameSite: "Lax",
-				},
+		NewBookExtractScript: "(() => ({ title: document.body.innerText, chapters: [] }))()",
+	}
+	
+	wc := models.WebsiteConfig{
+		Cookies: []models.Cookie{
+			{
+				Name:     "advanced",
+				Value:    "attributes",
+				Domain:   "127.0.0.1",
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   false,
+				SameSite: "Lax",
 			},
 		},
 	}
 
-	// We use ExecuteTestScript to just check if navigation works with these cookies
-	res, err := engine.ExecuteTestScript(ctx, models.ScrapingTestRequest{
-		TargetURL:     req.TargetURL,
-		WebsiteConfig: req.WebsiteConfig,
-		Script:        "document.body.innerText",
-	})
+	res, err := engine.ScrapeNewBook(ctx, req, wc)
 
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
 
-	if res != "Cookie Accepted" {
-		t.Errorf("Expected 'Cookie Accepted', got %v", res)
+	if res.Title != "Cookie Accepted" {
+		t.Errorf("Expected 'Cookie Accepted', got %v", res.Title)
 	}
 }
 
@@ -96,21 +96,22 @@ func TestScraper_NetworkInterception(t *testing.T) {
 	}
 	defer pool.Close()
 	
-	engine := NewScraper(pool, 1024*1024)
+	limiter := ratelimit.NewMemoryRateLimiter()
+	semaphore := ratelimit.NewMemorySemaphore(2)
+	engine := NewScraper(pool, 1024*1024, limiter, semaphore)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	req := models.ScrapingChapterRequest{
 		TargetURL: ts.URL,
-		WebsiteConfig: models.WebsiteConfig{
-			UseNetworkInterception: true,
-			Selectors: models.Selectors{
-				ChapterImages: "#test-img",
-			},
-		},
+	}
+	
+	wc := models.WebsiteConfig{
+		UseNetworkInterception: true,
+		Selector: "#test-img",
 	}
 
-	title, urls, results, cleanup, err := engine.ScrapeChapter(ctx, req)
+	title, urls, results, cleanup, err := engine.ScrapeChapter(ctx, req, wc)
 	if err != nil {
 		t.Fatalf("Scrape failed: %v", err)
 	}

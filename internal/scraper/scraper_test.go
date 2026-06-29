@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gatuno/scraper/internal/models"
+	"github.com/gatuno/scraper/internal/ratelimit"
 )
 
 func TestScraper_ExecuteTestScript(t *testing.T) {
@@ -27,7 +28,9 @@ func TestScraper_ExecuteTestScript(t *testing.T) {
 	}
 	defer pool.Close()
 	
-	engine := NewScraper(pool, 1024*1024)
+	limiter := ratelimit.NewMemoryRateLimiter()
+	semaphore := ratelimit.NewMemorySemaphore(2)
+	engine := NewScraper(pool, 1024*1024, limiter, semaphore)
 
 	// 3. Run Test
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -65,7 +68,9 @@ func TestScraper_ScrapeBook(t *testing.T) {
 	}
 	defer pool.Close()
 	
-	engine := NewScraper(pool, 1024*1024)
+	limiter := ratelimit.NewMemoryRateLimiter()
+	semaphore := ratelimit.NewMemorySemaphore(2)
+	engine := NewScraper(pool, 1024*1024, limiter, semaphore)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -81,7 +86,7 @@ func TestScraper_ScrapeBook(t *testing.T) {
 		})()`,
 	}
 
-	result, err := engine.ScrapeUpdateBook(ctx, req)
+	result, err := engine.ScrapeUpdateBook(ctx, req, models.WebsiteConfig{})
 	if err != nil {
 		t.Fatalf("Book scrape failed: %v", err)
 	}
@@ -120,7 +125,9 @@ func TestScraper_ScrapeUpdateBook_WithComplexConfig(t *testing.T) {
 	}
 	defer pool.Close()
 	
-	engine := NewScraper(pool, 1024*1024)
+	limiter := ratelimit.NewMemoryRateLimiter()
+	semaphore := ratelimit.NewMemorySemaphore(2)
+	engine := NewScraper(pool, 1024*1024, limiter, semaphore)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -129,12 +136,6 @@ func TestScraper_ScrapeUpdateBook_WithComplexConfig(t *testing.T) {
 		JobID:   "job-secret",
 		BookID:  "book-secret",
 		TargetURL: ts.URL,
-		WebsiteConfig: models.WebsiteConfig{
-			Cookies: []models.Cookie{
-				{Name: "session", Value: "secret", Domain: "127.0.0.1"},
-			},
-			PreScript: `document.getElementById('status').innerText = 'unlocked';`,
-		},
 		// Added a trailing comment to test robustness of wrapping
 		BookInfoExtractScript: `(() => {
 			const title = document.getElementById('title').innerText;
@@ -147,7 +148,14 @@ func TestScraper_ScrapeUpdateBook_WithComplexConfig(t *testing.T) {
 		})() // trailing comment`,
 	}
 
-	result, err := engine.ScrapeUpdateBook(ctx, req)
+	wc := models.WebsiteConfig{
+		Cookies: []models.Cookie{
+			{Name: "session", Value: "secret", Domain: "127.0.0.1"},
+		},
+		PreScript: `document.getElementById('status').innerText = 'unlocked';`,
+	}
+
+	result, err := engine.ScrapeUpdateBook(ctx, req, wc)
 	if err != nil {
 		t.Fatalf("Book scrape failed: %v", err)
 	}
