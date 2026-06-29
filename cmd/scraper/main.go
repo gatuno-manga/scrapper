@@ -15,7 +15,9 @@ import (
 	"github.com/gatuno/scraper/internal/models"
 	"github.com/gatuno/scraper/internal/scraper"
 	"github.com/gatuno/scraper/internal/storage"
+	"github.com/gatuno/scraper/internal/ratelimit"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -28,6 +30,17 @@ func main() {
 		log.Fatalf("Failed to init S3: %v", err)
 	}
 
+	// Redis
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     fmt.Sprintf("%s:%s", cfg.RedisHost, cfg.RedisPort),
+		Password: cfg.RedisPassword,
+		DB:       0,
+	})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	defer rdb.Close()
+
 	// Browser Pool
 	pool, err := scraper.NewBrowserPool(cfg.BrowserURL, cfg.BrowserPoolSize)
 	if err != nil {
@@ -35,8 +48,11 @@ func main() {
 	}
 	defer pool.Close()
 
+	limiter := ratelimit.NewRedisRateLimiter(rdb)
+	semaphore := ratelimit.NewRedisSemaphore(rdb, 2) // Max 2 browsers per domain globally
+
 	// Scraper
-	engine := scraper.NewScraper(pool, cfg.CacheMaxSizeMB*1024*1024)
+	engine := scraper.NewScraper(pool, cfg.CacheMaxSizeMB*1024*1024, limiter, semaphore)
 
 	// Kafka
 	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks)
@@ -66,11 +82,11 @@ func main() {
 	log.Println("Scraper Microservice started...")
 
 	// Launch handlers
-	go handleChapterRequests(ctx, chapterConsumer, producer, engine, s3, cfg)
-	go handleUpdateBookRequests(ctx, updateBookConsumer, producer, engine, cfg)
-	go handleNewBookRequests(ctx, newBookConsumer, producer, engine, cfg)
-	go handleCoversRequests(ctx, coversConsumer, producer, engine, s3, cfg)
-	go handleImagesRequests(ctx, imagesConsumer, producer, engine, s3, cfg)
+	go handleChapterRequests(ctx, chapterConsumer, producer, engine, s3, rdb, cfg)
+	go handleUpdateBookRequests(ctx, updateBookConsumer, producer, engine, rdb, cfg)
+	go handleNewBookRequests(ctx, newBookConsumer, producer, engine, rdb, cfg)
+	go handleCoversRequests(ctx, coversConsumer, producer, engine, s3, rdb, cfg)
+	go handleImagesRequests(ctx, imagesConsumer, producer, engine, s3, rdb, cfg)
 	go handleTestRequests(ctx, testConsumer, engine)
 
 	<-ctx.Done()
@@ -105,7 +121,23 @@ func commitOrLog(ctx context.Context, consumer *kafka.Consumer, msg kafka.Messag
 	}
 }
 
-func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
+func fetchWebsiteConfig(ctx context.Context, rdb *redis.Client, websiteID string) (models.WebsiteConfig, error) {
+	var wc models.WebsiteConfig
+	if websiteID == "" {
+		return wc, fmt.Errorf("empty websiteId")
+	}
+	key := fmt.Sprintf("website:config:%s", websiteID)
+	val, err := rdb.Get(ctx, key).Result()
+	if err != nil {
+		return wc, fmt.Errorf("failed to get config from redis: %w", err)
+	}
+	if err := json.Unmarshal([]byte(val), &wc); err != nil {
+		return wc, fmt.Errorf("failed to unmarshal website config: %w", err)
+	}
+	return wc, nil
+}
+
+func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, rdb *redis.Client, cfg config.Config) {
 	for {
 		msg, err := consumer.Fetch(ctx)
 		if err != nil {
@@ -131,7 +163,14 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			log.Printf("Processing chapter request: %s (Job: %s)", req.ChapterID, req.JobID)
 
-			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(ctx, req)
+			wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+			if err != nil {
+				log.Printf("Failed to fetch website config: %v", err)
+				sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicChapterRequested, msg.Value, err)
+				return
+			}
+
+			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(ctx, req, wc)
 			if err != nil {
 				log.Printf("Scrape failed: %v", err)
 				publishOrLog(ctx, producer, cfg.TopicChapterFailed, models.ScrapingChapterFailed{
@@ -155,7 +194,6 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			publishOrLog(ctx, producer, cfg.TopicChapterPagesExtracted, models.ScrapingChapterPagesExtracted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
-				TargetBucket: req.UploadTarget.Bucket,
 				ScrapedTitle: title,
 				TotalImages:  len(imageUrls),
 				Images:       intermediateImages,
@@ -186,10 +224,11 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 					continue
 				}
 
+				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
+
 				// Publish image processing request IMMEDIATELY
 				publishOrLog(ctx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
-					RawBucket:    req.UploadTarget.Bucket,
-					RawPath:      rawName,
+					RawPath:      rawPathWithBucket,
 					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
@@ -200,7 +239,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 					Index: r.Index,
 					Image: models.ScrapedImage{
 						OriginalURL: imageUrls[r.Index],
-						Path:        rawName,
+						Path:        rawPathWithBucket,
 					},
 				})
 
@@ -221,7 +260,6 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			publishOrLog(ctx, producer, cfg.TopicChapterCompleted, models.ScrapingChapterCompleted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
-				TargetBucket: req.UploadTarget.Bucket,
 				ScrapedTitle: title,
 				TotalImages:  len(scImages),
 				Images:       scImages,
@@ -232,7 +270,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 	}
 }
 
-func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, cfg config.Config) {
+func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, rdb *redis.Client, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicUpdateBookRequested)
 	for {
 		msg, err := consumer.Fetch(ctx)
@@ -253,7 +291,16 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 		}
 
 		log.Printf("Processing update-book request: %s (Job: %s)", req.BookID, req.JobID)
-		result, err := engine.ScrapeUpdateBook(ctx, req)
+		
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		if err != nil {
+			log.Printf("Failed to fetch website config: %v | Raw Message: %s", err, string(msg.Value))
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
+			continue
+		}
+
+		result, err := engine.ScrapeUpdateBook(ctx, req, wc)
 		if err != nil {
 			log.Printf("Update book scrape failed: %v", err)
 			publishOrLog(ctx, producer, cfg.TopicBookFailed, models.ScrapingBookFailed{
@@ -272,7 +319,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 	}
 }
 
-func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, cfg config.Config) {
+func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, rdb *redis.Client, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicNewBookRequested)
 	for {
 		msg, err := consumer.Fetch(ctx)
@@ -293,7 +340,16 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 		}
 
 		log.Printf("Processing new-book request (Job: %s)", req.JobID)
-		result, err := engine.ScrapeNewBook(ctx, req)
+		
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		if err != nil {
+			log.Printf("Failed to fetch website config: %v", err)
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicNewBookRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
+			continue
+		}
+
+		result, err := engine.ScrapeNewBook(ctx, req, wc)
 		if err != nil {
 			log.Printf("New book scrape failed: %v", err)
 			publishOrLog(ctx, producer, cfg.TopicBookFailed, models.ScrapingBookFailed{
@@ -311,7 +367,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 	}
 }
 
-func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
+func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, rdb *redis.Client, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicCoversRequested)
 	for {
 		msg, err := consumer.Fetch(ctx)
@@ -333,10 +389,18 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		log.Printf("Processing covers request: %s (Job: %s, Covers: %d)", req.BookID, req.JobID, len(req.Covers))
 
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		if err != nil {
+			log.Printf("Failed to fetch website config: %v", err)
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicCoversRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
+			continue
+		}
+
 		func(req models.ScrapingCoversRequest, msg kafka.Message) {
 			defer commitOrLog(ctx, consumer, msg)
 
-			results, cleanup := engine.ScrapeCovers(ctx, req)
+			results, cleanup := engine.ScrapeCovers(ctx, req, wc)
 			defer cleanup()
 
 			s3Paths := make([]string, 0, len(req.Covers))
@@ -357,11 +421,12 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 					continue
 				}
 
-				s3Paths = append(s3Paths, rawName)
+				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
+
+				s3Paths = append(s3Paths, rawPathWithBucket)
 
 				publishOrLog(ctx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
-					RawBucket:    req.UploadTarget.Bucket,
-					RawPath:      rawName,
+					RawPath:      rawPathWithBucket,
 					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
@@ -375,7 +440,6 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			publishOrLog(ctx, producer, cfg.TopicCoversCompleted, models.ScrapingCoversCompleted{
 				JobID:        req.JobID,
 				BookID:       req.BookID,
-				TargetBucket: req.UploadTarget.Bucket,
 				Results:      s3Paths,
 			})
 
@@ -384,7 +448,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 	}
 }
 
-func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, cfg config.Config) {
+func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, producer *kafka.Producer, engine *scraper.Scraper, s3 *storage.S3Client, rdb *redis.Client, cfg config.Config) {
 	log.Printf("Starting listener for topic: %s", cfg.TopicImagesRequested)
 	for {
 		msg, err := consumer.Fetch(ctx)
@@ -406,10 +470,18 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		log.Printf("Processing images request (Job: %s, Images: %d)", req.JobID, len(req.ImageURLs))
 
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		if err != nil {
+			log.Printf("Failed to fetch website config: %v", err)
+			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicImagesRequested, msg.Value, err)
+			commitOrLog(ctx, consumer, msg)
+			continue
+		}
+
 		func(req models.ScrapingImagesRequest, msg kafka.Message) {
 			defer commitOrLog(ctx, consumer, msg)
 
-			results, cleanup := engine.ScrapeImages(ctx, req)
+			results, cleanup := engine.ScrapeImages(ctx, req, wc)
 			defer cleanup()
 
 			urlMap := make(map[string]string)
@@ -430,15 +502,16 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 					continue
 				}
 
+				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
+
 				publishOrLog(ctx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
-					RawBucket:    req.UploadTarget.Bucket,
-					RawPath:      rawName,
+					RawPath:      rawPathWithBucket,
 					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
 				})
 
-				urlMap[req.ImageURLs[r.Index]] = rawName
+				urlMap[req.ImageURLs[r.Index]] = rawPathWithBucket
 				count++
 
 				// Early memory release for GC
@@ -449,7 +522,6 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			publishOrLog(ctx, producer, cfg.TopicImagesCompleted, models.ScrapingImagesCompleted{
 				JobID:        req.JobID,
 				EntityID:     req.EntityID,
-				TargetBucket: req.UploadTarget.Bucket,
 				Source:       "CHAPTER",
 				Format:       "images",
 				URLMap:       urlMap,

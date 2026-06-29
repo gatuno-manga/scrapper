@@ -20,6 +20,9 @@ type Config struct {
 	FlareSolverrURL string
 	BrowserPoolSize int
 	CacheMaxSizeMB  int64
+	RedisHost       string
+	RedisPort       string
+	RedisPassword   string
 
 	// Kafka General
 	KafkaWriteTimeout int // seconds
@@ -99,6 +102,9 @@ func LoadConfig() Config {
 		FlareSolverrURL: getEnv("FLARESOLVERR_URL", "http://localhost:8191"),
 		BrowserPoolSize: poolSize,
 		CacheMaxSizeMB:  cacheSize,
+		RedisHost:       getEnv("REDIS_HOST", "localhost"),
+		RedisPort:       getEnv("REDIS_PORT", "6379"),
+		RedisPassword:   getEnv("REDIS_PASSWORD", ""),
 
 		KafkaWriteTimeout: writeTimeout,
 		KafkaReadTimeout:  readTimeout,

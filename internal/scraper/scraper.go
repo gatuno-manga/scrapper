@@ -14,38 +14,32 @@ import (
 	"time"
 
 	"github.com/gatuno/scraper/internal/models"
+	"github.com/gatuno/scraper/internal/ratelimit"
 	"github.com/playwright-community/playwright-go"
-	"golang.org/x/time/rate"
 )
 
 type Scraper struct {
 	pool         *BrowserPool
 	cacheMaxSize int64
-	limiters     sync.Map // string (domain) -> *rate.Limiter
+	limiter      ratelimit.RateLimiter
+	semaphore    ratelimit.Semaphore
 }
 
-func NewScraper(pool *BrowserPool, cacheMaxSize int64) *Scraper {
+func NewScraper(pool *BrowserPool, cacheMaxSize int64, limiter ratelimit.RateLimiter, semaphore ratelimit.Semaphore) *Scraper {
 	return &Scraper{
 		pool:         pool,
 		cacheMaxSize: cacheMaxSize,
+		limiter:      limiter,
+		semaphore:    semaphore,
 	}
 }
 
-func (s *Scraper) getLimiter(targetUrl string) *rate.Limiter {
+func extractDomain(targetUrl string) string {
 	u, err := url.Parse(targetUrl)
-	domain := "global"
 	if err == nil && u.Host != "" {
-		domain = u.Host
+		return u.Host
 	}
-
-	if l, ok := s.limiters.Load(domain); ok {
-		return l.(*rate.Limiter)
-	}
-
-	// Default: 3 requests per second, burst of 5
-	l := rate.NewLimiter(rate.Every(333*time.Millisecond), 5)
-	actual, _ := s.limiters.LoadOrStore(domain, l)
-	return actual.(*rate.Limiter)
+	return "global"
 }
 
 type ImageResult struct {
@@ -82,18 +76,23 @@ async (options) => {
 }
 `
 
-func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterRequest) (string, []string, <-chan ImageResult, func(), error) {
+func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterRequest, config models.WebsiteConfig) (string, []string, <-chan ImageResult, func(), error) {
+	domain := extractDomain(req.TargetURL)
+	releaseSem, err := s.semaphore.Acquire(ctx, domain)
+	if err != nil {
+		return "", nil, nil, func() {}, err
+	}
+
 	var bCtx playwright.BrowserContext
-	var err error
 	isCustomContext := false
 
-	customUA := req.WebsiteConfig.Headers["User-Agent"]
-	if req.WebsiteConfig.ProxyURL != "" || customUA != "" {
+	customUA := config.Headers["User-Agent"]
+	if config.ProxyURL != "" || customUA != "" {
 		isCustomContext = true
 		opts := playwright.BrowserNewContextOptions{}
-		if req.WebsiteConfig.ProxyURL != "" {
+		if config.ProxyURL != "" {
 			opts.Proxy = &playwright.Proxy{
-				Server: req.WebsiteConfig.ProxyURL,
+				Server: config.ProxyURL,
 			}
 		}
 		if customUA != "" {
@@ -105,6 +104,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 
 	if err != nil {
+		releaseSem()
 		return "", nil, nil, func() {}, err
 	}
 
@@ -114,6 +114,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		} else {
 			bCtx.Close()
 		}
+		releaseSem()
 	}
 
 	page, err := bCtx.NewPage()
@@ -130,34 +131,48 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, interceptedImages); err != nil {
+	if err := s.preparePage(page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
 		cleanup()
 		return "", nil, nil, func() {}, err
 	}
 
-	titleElement := page.Locator(req.WebsiteConfig.Selectors.ChapterTitle).First()
-	scrapedTitle, _ := titleElement.TextContent()
+	titleSelector := config.ChapterTitleSelector
+	var scrapedTitle string
+	if titleSelector != "" {
+		titleElement := page.Locator(titleSelector).First()
+		scrapedTitle, _ = titleElement.TextContent()
+	}
 	if scrapedTitle == "" {
 		scrapedTitle, _ = page.Title()
 	}
 
 	log.Printf("Starting count-based scroll for lazy-loaded images...")
 	// Aggressive Scroll (Count-based)
+	imagesSelector := config.Selector
+	if req.ChapterSpecificSelector != "" {
+		imagesSelector = req.ChapterSpecificSelector
+	}
+
+	if imagesSelector == "" {
+		cleanup()
+		return "", nil, nil, func() {}, fmt.Errorf("images selector is empty (not found in website config or chapter request)")
+	}
+
 	_, err = page.Evaluate(aggressiveScrollJS, map[string]interface{}{
 		"scrollPauseMs":   1500,
 		"stabilityChecks": 3,
-		"imageSelector":   req.WebsiteConfig.Selectors.ChapterImages,
+		"imageSelector":   imagesSelector,
 	})
 	if err != nil {
 		log.Printf("Scroll failed: %v", err)
 	}
 
 	// Execute PosScript
-	if req.WebsiteConfig.PosScript != "" {
-		page.Evaluate(req.WebsiteConfig.PosScript)
+	if config.PosScript != "" {
+		page.Evaluate(config.PosScript)
 	}
 
-	imageLocators := page.Locator(req.WebsiteConfig.Selectors.ChapterImages)
+	imageLocators := page.Locator(imagesSelector)
 	count, err := imageLocators.Count()
 	if err != nil {
 		cleanup()
@@ -178,7 +193,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		}
 	}
 
-	results := s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, imageUrls, interceptedImages)
+	results := s.ScrapeBatchImages(ctx, page, config, imageUrls, interceptedImages)
 	return scrapedTitle, imageUrls, results, cleanup, nil
 }
 
@@ -223,7 +238,17 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 					}
 
 					// 2. Rate Limit per domain & Jitter
-					s.getLimiter(j.url).Wait(ctx)
+					u, _ := url.Parse(j.url)
+					domain := "global"
+					if u != nil && u.Host != "" {
+						domain = u.Host
+					}
+					
+					if err := s.limiter.Wait(ctx, domain); err != nil {
+						results <- ImageResult{Index: j.index, Error: err}
+						continue
+					}
+					
 					jitter := time.Duration(200+rand.Intn(500)) * time.Millisecond
 					time.Sleep(jitter)
 
@@ -353,6 +378,13 @@ type bookScrapeInput struct {
 // It acquires a browser context, navigates to the page, evaluates the extraction
 // script and returns a parsed ScrapingBookCompleted result.
 func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (models.ScrapingBookCompleted, error) {
+	domain := extractDomain(in.TargetURL)
+	releaseSem, err := s.semaphore.Acquire(ctx, domain)
+	if err != nil {
+		return models.ScrapingBookCompleted{}, err
+	}
+	defer releaseSem()
+
 	bCtx, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return models.ScrapingBookCompleted{}, err
@@ -418,20 +450,20 @@ func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (model
 	return result, nil
 }
 
-func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdateBookRequest) (models.ScrapingBookCompleted, error) {
+func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdateBookRequest, config models.WebsiteConfig) (models.ScrapingBookCompleted, error) {
 	script := req.BookInfoExtractScript
 	if script == "" {
 		script = req.Script
 	}
 	if script == "" {
-		script = req.WebsiteConfig.Selectors.BookInfoExtractScript
+		script = config.BookInfoExtractScript
 	}
 
 	result, err := s.scrapeBookPage(ctx, bookScrapeInput{
 		JobID:         req.JobID,
 		BookID:        req.BookID,
 		TargetURL:     req.TargetURL,
-		WebsiteConfig: req.WebsiteConfig,
+		WebsiteConfig: config,
 		Script:        script,
 	})
 	if err != nil {
@@ -441,19 +473,19 @@ func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdat
 	return result, nil
 }
 
-func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookRequest) (models.ScrapingBookCompleted, error) {
+func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookRequest, config models.WebsiteConfig) (models.ScrapingBookCompleted, error) {
 	script := req.NewBookExtractScript
 	if script == "" {
 		script = req.Script
 	}
 	if script == "" {
-		script = req.WebsiteConfig.Selectors.NewBookExtractScript
+		script = config.NewBookExtractScript
 	}
 
 	result, err := s.scrapeBookPage(ctx, bookScrapeInput{
 		JobID:         req.JobID,
 		TargetURL:     req.TargetURL,
-		WebsiteConfig: req.WebsiteConfig,
+		WebsiteConfig: config,
 		Script:        script,
 	})
 	if err != nil {
@@ -463,9 +495,19 @@ func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookR
 	return result, nil
 }
 
-func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversRequest) (<-chan ImageResult, func()) {
+func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversRequest, config models.WebsiteConfig) (<-chan ImageResult, func()) {
+	domain := extractDomain(req.TargetURL)
+	releaseSem, err := s.semaphore.Acquire(ctx, domain)
+	if err != nil {
+		res := make(chan ImageResult, 1)
+		res <- ImageResult{Error: err}
+		close(res)
+		return res, func() {}
+	}
+
 	bCtx, err := s.pool.Acquire(ctx)
 	if err != nil {
+		releaseSem()
 		res := make(chan ImageResult, 1)
 		res <- ImageResult{Error: err}
 		close(res)
@@ -475,6 +517,7 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 	page, err := bCtx.NewPage()
 	if err != nil {
 		s.pool.Release(bCtx)
+		releaseSem()
 		res := make(chan ImageResult, 1)
 		res <- ImageResult{Error: err}
 		close(res)
@@ -482,9 +525,10 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, interceptedImages); err != nil {
+	if err := s.preparePage(page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
+		releaseSem()
 		res := make(chan ImageResult, 1)
 		res <- ImageResult{Error: err}
 		close(res)
@@ -496,15 +540,30 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 		imageUrls = append(imageUrls, c.URL)
 	}
 
-	return s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, imageUrls, interceptedImages), func() {
+	return s.ScrapeBatchImages(ctx, page, config, imageUrls, interceptedImages), func() {
 		page.Close()
 		s.pool.Release(bCtx)
+		releaseSem()
 	}
 }
 
-func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesRequest) (<-chan ImageResult, func()) {
+func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesRequest, config models.WebsiteConfig) (<-chan ImageResult, func()) {
+	targetURL := ""
+	if len(req.ImageURLs) > 0 {
+		targetURL = req.ImageURLs[0]
+	}
+	domain := extractDomain(targetURL)
+	releaseSem, err := s.semaphore.Acquire(ctx, domain)
+	if err != nil {
+		res := make(chan ImageResult, 1)
+		res <- ImageResult{Error: err}
+		close(res)
+		return res, func() {}
+	}
+
 	bCtx, err := s.pool.Acquire(ctx)
 	if err != nil {
+		releaseSem()
 		res := make(chan ImageResult, 1)
 		res <- ImageResult{Error: err}
 		close(res)
@@ -514,35 +573,39 @@ func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesReq
 	page, err := bCtx.NewPage()
 	if err != nil {
 		s.pool.Release(bCtx)
+		releaseSem()
 		res := make(chan ImageResult, 1)
 		res <- ImageResult{Error: err}
 		close(res)
 		return res, func() {}
-	}
-
-	// We might not have a TargetURL for generic images, but if we do, it helps with headers/cookies
-	targetURL := ""
-	if len(req.ImageURLs) > 0 {
-		targetURL = req.ImageURLs[0]
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, targetURL, interceptedImages); err != nil {
+	if err := s.preparePage(page, bCtx, config, targetURL, interceptedImages); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
+		releaseSem()
 		res := make(chan ImageResult, 1)
 		res <- ImageResult{Error: err}
 		close(res)
 		return res, func() {}
 	}
 
-	return s.ScrapeBatchImages(ctx, page, req.WebsiteConfig, req.ImageURLs, interceptedImages), func() {
+	return s.ScrapeBatchImages(ctx, page, config, req.ImageURLs, interceptedImages), func() {
 		page.Close()
 		s.pool.Release(bCtx)
+		releaseSem()
 	}
 }
 
 func (s *Scraper) ExecuteTestScript(ctx context.Context, req models.ScrapingTestRequest) (interface{}, error) {
+	domain := extractDomain(req.TargetURL)
+	releaseSem, err := s.semaphore.Acquire(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSem()
+
 	bCtx, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -555,7 +618,7 @@ func (s *Scraper) ExecuteTestScript(ctx context.Context, req models.ScrapingTest
 	}
 	defer page.Close()
 
-	if err := s.preparePage(page, bCtx, req.WebsiteConfig, req.TargetURL, nil); err != nil {
+	if err := s.preparePage(page, bCtx, models.WebsiteConfig{}, req.TargetURL, nil); err != nil {
 		return nil, err
 	}
 

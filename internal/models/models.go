@@ -1,23 +1,32 @@
 package models
 
 type WebsiteConfig struct {
-	Name                         string             `json:"name"`
-	CloudflareBypass             bool               `json:"cloudflareBypass"`
-	PreScript                    string             `json:"preScript"`
-	PosScript                    string             `json:"posScript"`
-	UseNetworkInterception       bool               `json:"useNetworkInterception"`
-	UseScreenshotMode            bool               `json:"useScreenshotMode"`
-	Cookies                      []Cookie           `json:"cookies"`
+	ID                           string                 `json:"id"`
+	URL                          string                 `json:"url"`
+	IsActive                     bool                   `json:"isActive"`
+	Name                         string                 `json:"name"`
+	CloudflareBypass             bool                   `json:"cloudflareBypass"`
+	PreScript                    string                 `json:"preScript"`
+	PosScript                    string                 `json:"posScript"`
+	Selector                     string                 `json:"selector"` // Corresponds to chapter images
+	ChapterListSelector          string                 `json:"chapterListSelector"`
+	ChapterTitleSelector         string                 `json:"chapterTitleSelector"`
+	BookInfoExtractScript        string                 `json:"bookInfoExtractScript"`
+	NewBookExtractScript         string                 `json:"newBookExtractScript"`
+	ConcurrencyLimit             int                    `json:"concurrencyLimit"`
+	UseNetworkInterception       bool                   `json:"useNetworkInterception"`
+	UseScreenshotMode            bool                   `json:"useScreenshotMode"`
+	Cookies                      []Cookie               `json:"cookies"`
 	LocalStorage                 map[string]interface{} `json:"localStorage"`
 	SessionStorage               map[string]interface{} `json:"sessionStorage"`
-	ReloadAfterStorageInjection  bool               `json:"reloadAfterStorageInjection"`
-	EnableAdaptiveTimeouts       bool               `json:"enableAdaptiveTimeouts"`
-	TimeoutMultipliers           TimeoutMultipliers `json:"timeoutMultipliers"`
-	ProxyURL                     string             `json:"proxyUrl"`
-	BlacklistTerms               []string           `json:"blacklistTerms"`
-	WhitelistTerms               []string           `json:"whitelistTerms"`
-	Selectors                    Selectors          `json:"selectors"`
-	Headers                      map[string]string  `json:"headers"`
+	ReloadAfterStorageInjection  bool                   `json:"reloadAfterStorageInjection"`
+	EnableAdaptiveTimeouts       bool                   `json:"enableAdaptiveTimeouts"`
+	TimeoutMultipliers           TimeoutMultipliers     `json:"timeoutMultipliers"`
+	UseFlareSolverr              bool                   `json:"useFlareSolverr"`
+	ProxyURL                     string                 `json:"proxyUrl"`
+	BlacklistTerms               []string               `json:"blacklistTerms"`
+	WhitelistTerms               []string               `json:"whitelistTerms"`
+	Headers                      map[string]string      `json:"headers"`
 }
 
 type Cookie struct {
@@ -37,12 +46,7 @@ type TimeoutMultipliers struct {
 	Huge   float64 `json:"huge"`
 }
 
-type Selectors struct {
-	ChapterTitle          string `json:"chapterTitle"`
-	ChapterImages         string `json:"chapterImages"`
-	BookInfoExtractScript string `json:"bookInfoExtractScript"`
-	NewBookExtractScript  string `json:"newBookExtractScript"`
-}
+
 
 type UploadTarget struct {
 	Bucket     string `json:"bucket"`
@@ -50,12 +54,13 @@ type UploadTarget struct {
 }
 
 type ScrapingChapterRequest struct {
-	JobID         string        `json:"jobId"`
-	ChapterID     string        `json:"chapterId"`
-	BookID        string        `json:"bookId"`
-	TargetURL     string        `json:"targetUrl"`
-	WebsiteConfig WebsiteConfig `json:"websiteConfig"`
-	UploadTarget  UploadTarget  `json:"uploadTarget"`
+	JobID                   string       `json:"jobId"`
+	ChapterID               string       `json:"chapterId"`
+	BookID                  string       `json:"bookId"`
+	TargetURL               string       `json:"targetUrl"`
+	WebsiteID               string       `json:"websiteId"`
+	ChapterSpecificSelector string       `json:"chapterSpecificSelector,omitempty"`
+	UploadTarget            UploadTarget `json:"uploadTarget"`
 }
 
 type ScrapedImage struct {
@@ -66,7 +71,6 @@ type ScrapedImage struct {
 type ScrapingChapterCompleted struct {
 	JobID        string         `json:"jobId"`
 	ChapterID    string         `json:"chapterId"`
-	TargetBucket string         `json:"targetBucket"`
 	ScrapedTitle string         `json:"scrapedTitle"`
 	TotalImages  int            `json:"totalImages"`
 	Images       []ScrapedImage `json:"images"`
@@ -75,7 +79,6 @@ type ScrapingChapterCompleted struct {
 type ScrapingChapterPagesExtracted struct {
 	JobID        string         `json:"jobId"`
 	ChapterID    string         `json:"chapterId"`
-	TargetBucket string         `json:"targetBucket"`
 	ScrapedTitle string         `json:"scrapedTitle"`
 	TotalImages  int            `json:"totalImages"`
 	Images       []ScrapedImage `json:"images"`
@@ -89,7 +92,6 @@ type ScrapingChapterFailed struct {
 }
 
 type ImageProcessingRequested struct {
-	RawBucket    string `json:"rawBucket"`
 	RawPath      string `json:"rawPath"`
 	TargetBucket string `json:"targetBucket"`
 	TargetPath   string `json:"targetPath"`
@@ -97,27 +99,26 @@ type ImageProcessingRequested struct {
 }
 
 type ScrapingTestRequest struct {
-	TargetURL       string        `json:"targetUrl"`
-	Script          string        `json:"script"`
-	UseFlareSolverr bool          `json:"useFlareSolverr"`
-	WebsiteConfig   WebsiteConfig `json:"websiteConfig"`
+	TargetURL       string `json:"targetUrl"`
+	Script          string `json:"script"`
+	UseFlareSolverr bool   `json:"useFlareSolverr"`
 }
 
 type ScrapingUpdateBookRequest struct {
-	JobID                 string        `json:"jobId"`
-	BookID                string        `json:"bookId"`
-	TargetURL             string        `json:"targetUrl"`
-	WebsiteConfig         WebsiteConfig `json:"websiteConfig"`
-	BookInfoExtractScript string        `json:"bookInfoExtractScript"`
-	Script                string        `json:"script,omitempty"` // Fallback for some producers
+	JobID                 string `json:"jobId"`
+	BookID                string `json:"bookId"`
+	TargetURL             string `json:"targetUrl"`
+	WebsiteID             string `json:"websiteId"`
+	BookInfoExtractScript string `json:"bookInfoExtractScript"`
+	Script                string `json:"script,omitempty"` // Fallback for some producers
 }
 
 type ScrapingNewBookRequest struct {
-	JobID                string        `json:"jobId"`
-	TargetURL            string        `json:"targetUrl"`
-	WebsiteConfig        WebsiteConfig `json:"websiteConfig"`
-	NewBookExtractScript string        `json:"newBookExtractScript"`
-	Script               string        `json:"script,omitempty"` // Fallback for some producers
+	JobID                string `json:"jobId"`
+	TargetURL            string `json:"targetUrl"`
+	WebsiteID            string `json:"websiteId"`
+	NewBookExtractScript string `json:"newBookExtractScript"`
+	Script               string `json:"script,omitempty"` // Fallback for some producers
 }
 
 type ChapterInfo struct {
@@ -144,36 +145,34 @@ type ScrapingBookCompleted struct {
 }
 
 type ScrapingCoversRequest struct {
-	JobID         string        `json:"jobId"`
-	BookID        string        `json:"bookId"`
-	TargetURL     string        `json:"urlOrigin"` // Mapped from urlOrigin
-	WebsiteConfig WebsiteConfig `json:"websiteConfig"`
-	UploadTarget  UploadTarget  `json:"uploadTarget"`
-	Covers        []CoverInfo   `json:"images"` // Mapped from images
+	JobID        string      `json:"jobId"`
+	BookID       string      `json:"bookId"`
+	TargetURL    string      `json:"urlOrigin"` // Mapped from urlOrigin
+	WebsiteID    string      `json:"websiteId"`
+	UploadTarget UploadTarget `json:"uploadTarget"`
+	Covers       []CoverInfo `json:"images"` // Mapped from images
 }
 
 type ScrapingCoversCompleted struct {
-	JobID        string   `json:"jobId"`
-	BookID       string   `json:"bookId"`
-	TargetBucket string   `json:"targetBucket"`
-	Results      []string `json:"results"` // S3 Paths (raw)
+	JobID   string   `json:"jobId"`
+	BookID  string   `json:"bookId"`
+	Results []string `json:"results"` // S3 Paths (raw)
 }
 
 type ScrapingImagesRequest struct {
-	JobID         string        `json:"jobId"`
-	EntityID      string        `json:"entityId"`
-	WebsiteConfig WebsiteConfig `json:"websiteConfig"`
-	UploadTarget  UploadTarget  `json:"uploadTarget"`
-	ImageURLs     []string      `json:"imageUrls"`
+	JobID        string       `json:"jobId"`
+	EntityID     string       `json:"entityId"`
+	WebsiteID    string       `json:"websiteId"`
+	UploadTarget UploadTarget `json:"uploadTarget"`
+	ImageURLs    []string     `json:"imageUrls"`
 }
 
 type ScrapingImagesCompleted struct {
-	JobID        string            `json:"jobId"`
-	EntityID     string            `json:"entityId"`
-	TargetBucket string            `json:"targetBucket"`
-	Source       string            `json:"source"`
-	Format       string            `json:"format"`
-	URLMap       map[string]string `json:"urlMap"`
+	JobID    string            `json:"jobId"`
+	EntityID string            `json:"entityId"`
+	Source   string            `json:"source"`
+	Format   string            `json:"format"`
+	URLMap   map[string]string `json:"urlMap"`
 }
 
 // DeadLetterMessage is published to the DLQ topic when a message cannot be
