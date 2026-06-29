@@ -121,10 +121,13 @@ func commitOrLog(ctx context.Context, consumer *kafka.Consumer, msg kafka.Messag
 	}
 }
 
-func fetchWebsiteConfig(ctx context.Context, rdb *redis.Client, websiteID string) (models.WebsiteConfig, error) {
+func fetchWebsiteConfig(ctx context.Context, rdb *redis.Client, websiteID string, embedded *models.WebsiteConfig) (models.WebsiteConfig, error) {
+	if embedded != nil {
+		return *embedded, nil
+	}
 	var wc models.WebsiteConfig
 	if websiteID == "" {
-		return wc, fmt.Errorf("empty websiteId")
+		return wc, fmt.Errorf("empty websiteId and no embedded config")
 	}
 	key := fmt.Sprintf("website:config:%s", websiteID)
 	val, err := rdb.Get(ctx, key).Result()
@@ -163,7 +166,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			log.Printf("Processing chapter request: %s (Job: %s)", req.ChapterID, req.JobID)
 
-			wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+			wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID, req.WebsiteConfig)
 			if err != nil {
 				log.Printf("Failed to fetch website config: %v", err)
 				sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicChapterRequested, msg.Value, err)
@@ -292,7 +295,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		log.Printf("Processing update-book request: %s (Job: %s)", req.BookID, req.JobID)
 		
-		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
 			log.Printf("Failed to fetch website config: %v | Raw Message: %s", err, string(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
@@ -341,7 +344,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		log.Printf("Processing new-book request (Job: %s)", req.JobID)
 		
-		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
 			log.Printf("Failed to fetch website config: %v", err)
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicNewBookRequested, msg.Value, err)
@@ -389,7 +392,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		log.Printf("Processing covers request: %s (Job: %s, Covers: %d)", req.BookID, req.JobID, len(req.Covers))
 
-		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
 			log.Printf("Failed to fetch website config: %v", err)
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicCoversRequested, msg.Value, err)
@@ -470,7 +473,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		log.Printf("Processing images request (Job: %s, Images: %d)", req.JobID, len(req.ImageURLs))
 
-		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID)
+		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
 			log.Printf("Failed to fetch website config: %v", err)
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicImagesRequested, msg.Value, err)

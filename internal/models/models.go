@@ -58,9 +58,10 @@ type ScrapingChapterRequest struct {
 	ChapterID               string       `json:"chapterId"`
 	BookID                  string       `json:"bookId"`
 	TargetURL               string       `json:"targetUrl"`
-	WebsiteID               string       `json:"websiteId"`
-	ChapterSpecificSelector string       `json:"chapterSpecificSelector,omitempty"`
-	UploadTarget            UploadTarget `json:"uploadTarget"`
+	WebsiteID               string         `json:"websiteId"`
+	WebsiteConfig           *WebsiteConfig `json:"websiteConfig,omitempty"`
+	ChapterSpecificSelector string         `json:"chapterSpecificSelector,omitempty"`
+	UploadTarget            UploadTarget   `json:"uploadTarget"`
 }
 
 type ScrapedImage struct {
@@ -108,17 +109,19 @@ type ScrapingUpdateBookRequest struct {
 	JobID                 string `json:"jobId"`
 	BookID                string `json:"bookId"`
 	TargetURL             string `json:"targetUrl"`
-	WebsiteID             string `json:"websiteId"`
-	BookInfoExtractScript string `json:"bookInfoExtractScript"`
-	Script                string `json:"script,omitempty"` // Fallback for some producers
+	WebsiteID             string         `json:"websiteId"`
+	WebsiteConfig         *WebsiteConfig `json:"websiteConfig,omitempty"`
+	BookInfoExtractScript string         `json:"bookInfoExtractScript"`
+	Script                string         `json:"script,omitempty"` // Fallback for some producers
 }
 
 type ScrapingNewBookRequest struct {
 	JobID                string `json:"jobId"`
 	TargetURL            string `json:"targetUrl"`
-	WebsiteID            string `json:"websiteId"`
-	NewBookExtractScript string `json:"newBookExtractScript"`
-	Script               string `json:"script,omitempty"` // Fallback for some producers
+	WebsiteID            string         `json:"websiteId"`
+	WebsiteConfig        *WebsiteConfig `json:"websiteConfig,omitempty"`
+	NewBookExtractScript string         `json:"newBookExtractScript"`
+	Script               string         `json:"script,omitempty"` // Fallback for some producers
 }
 
 type ChapterInfo struct {
@@ -148,9 +151,10 @@ type ScrapingCoversRequest struct {
 	JobID        string      `json:"jobId"`
 	BookID       string      `json:"bookId"`
 	TargetURL    string      `json:"urlOrigin"` // Mapped from urlOrigin
-	WebsiteID    string      `json:"websiteId"`
-	UploadTarget UploadTarget `json:"uploadTarget"`
-	Covers       []CoverInfo `json:"images"` // Mapped from images
+	WebsiteID    string         `json:"websiteId"`
+	WebsiteConfig *WebsiteConfig `json:"websiteConfig,omitempty"`
+	UploadTarget UploadTarget   `json:"uploadTarget"`
+	Covers       []CoverInfo    `json:"images"` // Mapped from images
 }
 
 type ScrapingCoversCompleted struct {
@@ -162,9 +166,10 @@ type ScrapingCoversCompleted struct {
 type ScrapingImagesRequest struct {
 	JobID        string       `json:"jobId"`
 	EntityID     string       `json:"entityId"`
-	WebsiteID    string       `json:"websiteId"`
-	UploadTarget UploadTarget `json:"uploadTarget"`
-	ImageURLs    []string     `json:"imageUrls"`
+	WebsiteID    string         `json:"websiteId"`
+	WebsiteConfig *WebsiteConfig `json:"websiteConfig,omitempty"`
+	UploadTarget UploadTarget   `json:"uploadTarget"`
+	ImageURLs    []string       `json:"imageUrls"`
 }
 
 type ScrapingImagesCompleted struct {
