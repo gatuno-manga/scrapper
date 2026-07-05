@@ -95,8 +95,8 @@ func TestScraper_ScrapeBook(t *testing.T) {
 		t.Errorf("Expected title 'My Awesome Book', got %s", result.Title)
 	}
 
-	if len(result.Chapters) != 2 {
-		t.Errorf("Expected 2 chapters, got %d", len(result.Chapters))
+	if result.Chapters.Len() != 2 {
+		t.Errorf("Expected 2 chapters, got %d", result.Chapters.Len())
 	}
 }
 
@@ -165,12 +165,24 @@ func TestScraper_ScrapeUpdateBook_WithComplexConfig(t *testing.T) {
 		t.Errorf("Expected title '%s', got '%s'", expectedTitle, result.Title)
 	}
 
-	if len(result.Chapters) != 1 {
-		t.Errorf("Expected 1 chapter, got %d", len(result.Chapters))
+	if result.Chapters.Len() != 1 {
+		t.Errorf("Expected 1 chapter, got %d", result.Chapters.Len())
 	}
 
 	// Verify float index
-	if result.Chapters[0].Index != 0.5 {
-		t.Errorf("Expected index 0.5, got %f", result.Chapters[0].Index)
+	var firstChapter models.ChapterInfo
+	if result.Chapters.IsMap {
+		for _, v := range result.Chapters.Map {
+			if len(v) > 0 {
+				firstChapter = v[0]
+				break
+			}
+		}
+	} else {
+		firstChapter = result.Chapters.Array[0]
+	}
+
+	if firstChapter.Index != 0.5 {
+		t.Errorf("Expected index 0.5, got %f", firstChapter.Index)
 	}
 }

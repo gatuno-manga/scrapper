@@ -1,5 +1,11 @@
 package models
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
 type WebsiteConfig struct {
 	ID                           string                 `json:"id"`
 	URL                          string                 `json:"url"`
@@ -125,9 +131,56 @@ type ScrapingNewBookRequest struct {
 }
 
 type ChapterInfo struct {
-	Title string  `json:"title"`
-	URL   string  `json:"url"`
-	Index float64 `json:"index"`
+	Title        string  `json:"title"`
+	URL          string  `json:"url"`
+	Index        float64 `json:"index"`
+	IsFinal      bool    `json:"isFinal,omitempty"`
+	LanguageCode string  `json:"languageCode,omitempty"`
+}
+
+type ChapterList struct {
+	IsMap bool
+	Array []ChapterInfo
+	Map   map[string][]ChapterInfo
+}
+
+func (c *ChapterList) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil
+	}
+	if data[0] == '[' {
+		c.IsMap = false
+		return json.Unmarshal(data, &c.Array)
+	} else if data[0] == '{' {
+		c.IsMap = true
+		return json.Unmarshal(data, &c.Map)
+	}
+	return fmt.Errorf("invalid chapters format")
+}
+
+func (c ChapterList) MarshalJSON() ([]byte, error) {
+	if c.IsMap {
+		if c.Map == nil {
+			return []byte("{}"), nil
+		}
+		return json.Marshal(c.Map)
+	}
+	if c.Array == nil {
+		return []byte("[]"), nil
+	}
+	return json.Marshal(c.Array)
+}
+
+func (c ChapterList) Len() int {
+	if c.IsMap {
+		count := 0
+		for _, v := range c.Map {
+			count += len(v)
+		}
+		return count
+	}
+	return len(c.Array)
 }
 
 type CoverInfo struct {
@@ -143,7 +196,7 @@ type ScrapingBookCompleted struct {
 	Description string        `json:"description"`
 	Authors     []string      `json:"authors"`
 	Tags        []string      `json:"tags"`
-	Chapters    []ChapterInfo `json:"chapters"`
+	Chapters    ChapterList   `json:"chapters"`
 	Covers      []CoverInfo   `json:"covers"`
 }
 

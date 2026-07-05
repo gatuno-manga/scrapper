@@ -437,7 +437,7 @@ func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (model
 		result.Title, _ = page.Title()
 	}
 
-	if len(result.Chapters) == 0 {
+	if result.Chapters.Len() == 0 {
 		log.Printf("WARNING: No chapters extracted for %s. Page Title: %s", in.TargetURL, result.Title)
 		bodySnippet, _ := page.Evaluate(`document.body.innerText.substring(0, 500)`)
 		log.Printf("Page Body Snippet: %v", bodySnippet)
@@ -469,7 +469,7 @@ func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdat
 	if err != nil {
 		return result, err
 	}
-	log.Printf("Book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, len(result.Chapters), len(result.Covers))
+	log.Printf("Book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, result.Chapters.Len(), len(result.Covers))
 	return result, nil
 }
 
@@ -491,7 +491,7 @@ func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookR
 	if err != nil {
 		return result, err
 	}
-	log.Printf("New book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, len(result.Chapters), len(result.Covers))
+	log.Printf("New book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, result.Chapters.Len(), len(result.Covers))
 	return result, nil
 }
 
