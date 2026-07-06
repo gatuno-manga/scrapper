@@ -14,9 +14,12 @@ RUN go mod download
 COPY . .
 
 # Build the application
-# We use CGO_ENABLED=0 for a static binary if no CGO dependencies are used.
-# Playwright-go handles its driver internally.
 RUN CGO_ENABLED=0 GOOS=linux go build -v -o scraper ./cmd/scraper/main.go
+
+# Download the Playwright driver into /pw-driver (only the driver, not browsers)
+# PLAYWRIGHT_DRIVER_PATH tells playwright-go where to store/find the driver.
+ENV PLAYWRIGHT_DRIVER_PATH=/pw-driver
+RUN go run github.com/playwright-community/playwright-go/cmd/playwright install --skip-browsers 2>&1 || true
 
 # Stage 2: Final minimal image
 FROM debian:bookworm-slim
@@ -30,16 +33,16 @@ WORKDIR /app
 # Copy the binary from the builder
 COPY --from=builder /app/scraper .
 
-# The playwright-go driver is needed at runtime. 
-# In production, connecting to Browserless avoids needing browsers in this image.
-# However, the playwright-go library needs to find its driver.
-# We run a dummy command to ensure the driver is present in the binary or downloaded.
-# Actually, the driver is usually embedded or downloaded on first run.
+# Copy the pre-downloaded Playwright driver — zero CDN downloads at runtime!
+COPY --from=builder /pw-driver /pw-driver
 
 # Create non-root user
 RUN useradd -m -u 10001 appuser && \
-    chown appuser:appuser /app/scraper
+    chown -R appuser:appuser /app /pw-driver
 
 USER appuser
+
+# Tell playwright-go onde encontrar o driver em disco (sem precisar baixar)
+ENV PLAYWRIGHT_DRIVER_PATH=/pw-driver
 
 ENTRYPOINT ["./scraper"]

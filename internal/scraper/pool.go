@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 
@@ -19,10 +20,20 @@ type BrowserPool struct {
 	sem chan struct{}
 }
 
-func NewBrowserPool(browserURL string, poolSize int) (*BrowserPool, error) {
-	err := playwright.Install(&playwright.RunOptions{
+func playwrightRunOptions() *playwright.RunOptions {
+	opts := &playwright.RunOptions{
 		SkipInstallBrowsers: true,
-	})
+	}
+	// Se PLAYWRIGHT_DRIVER_PATH estiver definido (ex.: imagem Docker com driver pré-baixado),
+	// usa o driver local — sem nenhum download da CDN.
+	if driverPath := os.Getenv("PLAYWRIGHT_DRIVER_PATH"); driverPath != "" {
+		opts.DriverDirectory = driverPath
+	}
+	return opts
+}
+
+func NewBrowserPool(browserURL string, poolSize int) (*BrowserPool, error) {
+	err := playwright.Install(playwrightRunOptions())
 	if err != nil {
 		return nil, fmt.Errorf("could not install playwright driver: %v", err)
 	}
