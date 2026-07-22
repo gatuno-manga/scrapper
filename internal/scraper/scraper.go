@@ -15,7 +15,7 @@ import (
 
 	"github.com/gatuno/scraper/internal/models"
 	"github.com/gatuno/scraper/internal/ratelimit"
-	"github.com/playwright-community/playwright-go"
+	"github.com/mxschmitt/playwright-go"
 )
 
 type Scraper struct {

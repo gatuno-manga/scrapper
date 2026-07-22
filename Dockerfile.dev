@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Install Playwright driver
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps
+    go run github.com/mxschmitt/playwright-go/cmd/playwright install --with-deps
 
 # Expose port for health checks or metrics if any
 EXPOSE 8080
