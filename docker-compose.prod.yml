@@ -2,9 +2,9 @@ name: gatuno
 
 services:
   browserless:
-    image: browserless/chrome:latest
+    image: browserless/chrome:v2.9.0
     container_name: gatuno-browserless
-    restart: always
+    restart: on-failure:3
     environment:
       - MAX_CONCURRENT_SESSIONS=10
       - CONNECTION_TIMEOUT=300000
@@ -12,7 +12,7 @@ services:
       - gatuno-net
 
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
+    image: ghcr.io/flaresolverr/flaresolverr:v3.3.17
     container_name: gatuno-flaresolverr
     restart: always
     environment:
@@ -25,7 +25,7 @@ services:
       context: .
       dockerfile: Dockerfile.prod
     container_name: gatuno-scraper
-    restart: always
+    restart: on-failure:3
     env_file: .env
     environment:
       - BROWSER_URL=ws://browserless:3000

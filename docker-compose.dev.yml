@@ -18,7 +18,7 @@ services:
       - gatuno-net
 
   browserless:
-    image: browserless/chrome:latest
+    image: browserless/chrome:v2.9.0
     ports:
       - "3002:3000"
     environment:
@@ -30,7 +30,7 @@ services:
       - gatuno-net
 
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
+    image: ghcr.io/flaresolverr/flaresolverr:v3.3.17
     container_name: scraping-flaresolverr
     environment:
       - LOG_LEVEL=info

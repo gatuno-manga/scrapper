@@ -1,48 +1,48 @@
+# syntax=docker/dockerfile:1.4
 # Stage 1: Build the Go application
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache git
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add --no-cache git
 
 # Copy dependency files and download
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy source code
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -v -o scraper ./cmd/scraper/main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -v -o scraper ./cmd/scraper/main.go
 
 # Download the Playwright driver into /pw-driver (only the driver, not browsers)
 # PLAYWRIGHT_DRIVER_PATH tells playwright-go where to store/find the driver.
 ENV PLAYWRIGHT_DRIVER_PATH=/pw-driver
-RUN go run github.com/playwright-community/playwright-go/cmd/playwright install --skip-browsers 2>&1 || true
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go run github.com/playwright-community/playwright-go/cmd/playwright install --skip-browsers 2>&1 || true
 
 # Stage 2: Final minimal image
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/base-debian12:nonroot
 
 WORKDIR /app
 
 # Copy the binary from the builder
-COPY --from=builder /app/scraper .
+COPY --from=builder --chown=nonroot:nonroot /app/scraper .
 
 # Copy the pre-downloaded Playwright driver — zero CDN downloads at runtime!
-COPY --from=builder /pw-driver /pw-driver
-
-# Create non-root user
-RUN useradd -m -u 10001 appuser && \
-    chown -R appuser:appuser /app /pw-driver
-
-USER appuser
+COPY --from=builder --chown=nonroot:nonroot /pw-driver /pw-driver
 
 # Tell playwright-go onde encontrar o driver em disco (sem precisar baixar)
 ENV PLAYWRIGHT_DRIVER_PATH=/pw-driver
+
+# Set user to nonroot
+USER nonroot
 
 ENTRYPOINT ["./scraper"]

@@ -1,0 +1,15 @@
+.git
+.github
+.gitignore
+.env
+.air.toml
+.commitlintrc.json
+lefthook.yml
+debug_request.json
+Dockerfile*
+docker-compose*
+README.md
+LICENSE
+tmp
+bin
+cli
