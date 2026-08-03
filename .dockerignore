@@ -13,3 +13,6 @@ LICENSE
 tmp
 bin
 cli
+node_modules
+vendor/
+*.log

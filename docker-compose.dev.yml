@@ -5,8 +5,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    volumes:
-      - .:/app
+    restart: on-failure:3
+    # Usando Docker Compose Watch ao invés de Bind Mounts para melhor performance no Mac/Windows
+    develop:
+      watch:
+        - action: sync
+          path: .
+          target: /app
+          ignore:
+            - .git/
+            - node_modules/
+            - tmp/
     env_file:
       - .env
     ports:

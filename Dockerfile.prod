@@ -20,7 +20,7 @@ COPY . .
 # Build the application
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -v -o scraper ./cmd/scraper/main.go
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -v -o scraper ./cmd/scraper/main.go
 
 # Download the Playwright driver into /pw-driver (only the driver, not browsers)
 # PLAYWRIGHT_DRIVER_PATH tells playwright-go where to store/find the driver.
