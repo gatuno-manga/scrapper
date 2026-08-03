@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/playwright-community/playwright-go"
+	"github.com/mxschmitt/playwright-go"
 )
 
 type BrowserPool struct {
