@@ -9,9 +9,10 @@ RUN --mount=type=cache,target=/var/cache/apk \
     apk add --no-cache git
 
 # Copy dependency files and download
+ENV GOPROXY="https://proxy.golang.org,direct"
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    go mod download || go mod download || go mod download
 
 # Copy source code
 COPY . .

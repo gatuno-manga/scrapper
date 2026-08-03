@@ -16,9 +16,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go install github.com/air-verse/air@v1.52.3
 
 # Copy dependency files
+ENV GOPROXY="https://proxy.golang.org,direct"
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    go mod download || go mod download || go mod download
 
 # Install Playwright driver
 RUN --mount=type=cache,target=/go/pkg/mod \
