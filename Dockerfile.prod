@@ -29,7 +29,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go run github.com/mxschmitt/playwright-go/cmd/playwright install --skip-browsers 2>&1 || true
 
 # Stage 2: Final minimal image
-FROM gcr.io/distroless/base-debian12:nonroot
+FROM debian:12-slim
+
+RUN groupadd --system nonroot && useradd --system -g nonroot nonroot
 
 WORKDIR /app
 
