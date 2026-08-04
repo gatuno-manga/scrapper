@@ -183,11 +183,34 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	imageUrls := make([]string, 0, count)
 	for i := 0; i < count; i++ {
 		img := imageLocators.Nth(i)
-		srcI, _ := img.Evaluate("node => node.currentSrc || node.src", nil)
+		srcI, _ := img.Evaluate(`node => {
+			const attrs = ['data-src', 'data-lazy-src', 'data-aload', 'data-original'];
+			let targetUrl = '';
+			for (let attr of attrs) {
+				const val = node.getAttribute(attr);
+				if (val && !val.startsWith('data:')) {
+					targetUrl = val;
+					break;
+				}
+			}
+			if (!targetUrl && node.currentSrc && !node.currentSrc.startsWith('data:')) {
+				targetUrl = node.currentSrc;
+			}
+			if (!targetUrl && node.src && !node.src.startsWith('data:')) {
+				targetUrl = node.src;
+			}
+			
+			if (targetUrl) {
+				try {
+					return new URL(targetUrl, window.location.href).href;
+				} catch (e) {
+					return targetUrl;
+				}
+			}
+			return '';
+		}`, nil)
+		
 		src, _ := srcI.(string)
-		if src == "" {
-			src, _ = img.GetAttribute("data-src")
-		}
 		if src != "" {
 			imageUrls = append(imageUrls, src)
 		}
