@@ -21,7 +21,7 @@ A stateless web scraping microservice built with Go, Kafka, Playwright, and S3.
 
 ### Microservice
 ```bash
-go run ./cmd/scraper/main.go
+go run ./cmd/scraper
 ```
 
 ### CLI Test Tool
@@ -38,20 +38,24 @@ The CLI allows testing the scraper locally without Kafka/S3.
 ./bin/cli -mode test -url "https://google.com" -script "document.title"
 ```
 
-## Performance Monitoring & Profiling
-The microservice includes a `pprof` server for real-time performance analysis.
+## Ops Server: Health, Metrics & Profiling
+The microservice always runs an ops HTTP server (default `:6060`, override with
+`OPS_ADDR`) alongside the Kafka consumers:
 
-### Profiling Endpoints
-- **CPU Profile**: `http://localhost:6060/debug/pprof/profile`
-- **Memory (Heap)**: `http://localhost:6060/debug/pprof/heap`
-- **Goroutines**: `http://localhost:6060/debug/pprof/goroutine`
+- **Liveness**: `GET /healthz` — process is up, no dependency checks.
+- **Readiness**: `GET /readyz` — checks Redis, the browser connection and Kafka;
+  returns `503` if any dependency is unreachable.
+- **Metrics**: `GET /metrics` — Prometheus exposition format.
+- **Profiling**: `/debug/pprof/*` — disabled by default, no rebuild required to
+  enable it.
 
-### How to analyze (Visual Mode)
-Note: The pprof server must be enabled at build time using the `pprof` tag.
+### Profiling
+Set `PPROF_ENABLED=true` (an env var, not a build tag) to expose pprof on the
+same ops server. Never expose this port publicly — it has no authentication.
 
 ```bash
-# Build with pprof enabled
-go build -tags pprof -o bin/scraper ./cmd/scraper/main.go
+# Enable pprof at runtime
+PPROF_ENABLED=true go run ./cmd/scraper
 
 # View Memory Usage Graph
 go tool pprof -http=:8080 http://localhost:6060/debug/pprof/heap

@@ -84,6 +84,9 @@ func main() {
 	testConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-test", cfg.TopicTestRequested, cfg.KafkaReadTimeout)
 	defer testConsumer.Close()
 
+	opsServer := startOpsServer(cfg, rdb, pool)
+	defer opsServer.Close()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

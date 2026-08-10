@@ -42,6 +42,12 @@ services:
     environment:
       - BROWSER_URL=ws://browserless:3000
       - FLARESOLVERR_URL=http://flaresolverr:8191
+    ports:
+      # Loopback-only: the ops server exposes /metrics and (if PPROF_ENABLED)
+      # pprof, neither of which should be reachable from outside the host.
+      # The healthcheck below runs inside the container's own network
+      # namespace and does not need this mapping at all.
+      - "127.0.0.1:6060:6060"
     depends_on:
       browserless:
         condition: service_healthy
@@ -49,6 +55,12 @@ services:
         condition: service_healthy
     networks:
       - gatuno-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6060/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 networks:
   gatuno-net:

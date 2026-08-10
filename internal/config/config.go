@@ -34,6 +34,10 @@ type Config struct {
 	LogLevel  string // debug|info|warn|error, parsed via obs.ParseLevel
 	LogFormat string // "json" (production) or "text" (local dev)
 
+	// Ops server (OBS-06): /healthz, /readyz, /metrics, env-gated pprof
+	OpsAddr      string
+	PprofEnabled bool
+
 	// Kafka Topics
 	TopicChapterRequested string
 	TopicUpdateBookRequested string
@@ -120,6 +124,11 @@ func LoadConfig() Config {
 
 		LogLevel:  getEnv("LOG_LEVEL", "info"),
 		LogFormat: getEnv("LOG_FORMAT", "json"),
+
+		OpsAddr: getEnv("OPS_ADDR", ":6060"),
+		// Defaults to false so pprof is opt-in even in production; flip it
+		// via env, no rebuild required, and never expose this port publicly.
+		PprofEnabled: os.Getenv("PPROF_ENABLED") == "true",
 
 		TopicChapterRequested: getEnv("TOPIC_CHAPTER_REQUESTED", "scraping.chapter.requested"),
 		TopicUpdateBookRequested: getEnv("TOPIC_UPDATE_BOOK_REQUESTED", "scraping.update-book.requested"),

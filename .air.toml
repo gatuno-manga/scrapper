@@ -3,7 +3,7 @@ tmp_dir = "tmp"
 
 [build]
   bin = "./tmp/main"
-  cmd = "go build -tags pprof -o ./tmp/main ./cmd/scraper/main.go"
+  cmd = "go build -o ./tmp/main ./cmd/scraper"
   delay = 1000
   exclude_dir = ["bin", "tmp", ".git"]
   exclude_file = []

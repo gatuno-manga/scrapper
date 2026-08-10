@@ -21,7 +21,7 @@ COPY . .
 # Build the application
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -v -o scraper ./cmd/scraper/main.go
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -v -o scraper ./cmd/scraper
 
 # Download the Playwright driver into /pw-driver (only the driver, not browsers)
 # PLAYWRIGHT_DRIVER_PATH tells playwright-go where to store/find the driver.
@@ -32,6 +32,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Stage 2: Final minimal image
 FROM debian:12-slim
+
+# curl is needed for the container healthcheck (docker-compose.prod.yml)
+# against the ops server's /readyz endpoint (OBS-06).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends curl
 
 RUN groupadd --system nonroot && useradd --system -g nonroot nonroot
 

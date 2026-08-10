@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -90,6 +91,20 @@ func keyedMessage(topic, key string, payload []byte) kafka.Message {
 
 func (p *Producer) Close() error {
 	return p.writer.Close()
+}
+
+// Ping verifies at least one of the given brokers is reachable, by dialing
+// it directly. Used by the /readyz endpoint (OBS-06) to detect a scraper
+// that has lost Kafka connectivity without waiting for a publish to fail.
+func Ping(ctx context.Context, brokers []string) error {
+	if len(brokers) == 0 {
+		return fmt.Errorf("no kafka brokers configured")
+	}
+	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // --- Consumer ---

@@ -8,16 +8,18 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gatuno/scraper/internal/obs"
 	"github.com/mxschmitt/playwright-go"
 )
 
 type BrowserPool struct {
-	pw         *playwright.Playwright
-	browser    playwright.Browser
-	browserURL string
-	
+	pw          *playwright.Playwright
+	browser     playwright.Browser
+	browserURL  string
+	connectedAt time.Time
+
 	mu  sync.Mutex
 	sem chan struct{}
 }
@@ -66,6 +68,11 @@ func (p *BrowserPool) ensureBrowser(ctx context.Context) error {
 	if p.browser != nil && p.browser.IsConnected() {
 		return nil
 	}
+
+	// A prior browser existing here means we lost the connection and are
+	// reconnecting, as opposed to connecting for the very first time.
+	isReconnect := p.browser != nil
+	previousAge := time.Since(p.connectedAt)
 
 	// Close old browser if it exists but is disconnected
 	if p.browser != nil {
@@ -120,8 +127,23 @@ func (p *BrowserPool) ensureBrowser(ctx context.Context) error {
 		}
 	}
 
-	obs.From(ctx).Info("browser connection established", "browser_url", p.browserURL)
+	p.connectedAt = time.Now()
+
+	if isReconnect {
+		obs.From(ctx).Warn("browser reconnected", "browser_url", p.browserURL, "previous_connection_age", previousAge.String())
+	} else {
+		obs.From(ctx).Info("browser connection established", "browser_url", p.browserURL)
+	}
 	return nil
+}
+
+// IsConnected reports whether the pool currently holds a live browser
+// connection. Used by the /readyz endpoint (OBS-06) to detect a scraper
+// that has lost its browser without a metrics scrape or manual check.
+func (p *BrowserPool) IsConnected() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.browser != nil && p.browser.IsConnected()
 }
 
 func (p *BrowserPool) Acquire(ctx context.Context) (playwright.BrowserContext, error) {
