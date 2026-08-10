@@ -215,8 +215,12 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				}
 
 				// Generate unique ID for the image (UUIDv7 for better time-sorting/locality)
-				id, _ := uuid.NewV7()
-				imgID := id.String()
+				imgID, err := newImageID()
+				if err != nil {
+					log.Printf("Failed to generate image id (index %d): %v", r.Index, err)
+					r.Data = nil
+					continue
+				}
 
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
@@ -414,8 +418,12 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 				}
 
 				// Path pattern: <prefix>/<shard>/<uuid>.jpg
-				id, _ := uuid.NewV7()
-				imgID := id.String()
+				imgID, err := newImageID()
+				if err != nil {
+					log.Printf("Failed to generate cover id (index %d): %v", r.Index, err)
+					r.Data = nil
+					continue
+				}
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				if _, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
@@ -495,8 +503,12 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 					continue
 				}
 
-				id, _ := uuid.NewV7()
-				imgID := id.String()
+				imgID, err := newImageID()
+				if err != nil {
+					log.Printf("Failed to generate image id (index %d): %v", r.Index, err)
+					r.Data = nil
+					continue
+				}
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				if _, err := s3.Upload(ctx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
@@ -561,6 +573,21 @@ func handleTestRequests(ctx context.Context, consumer *kafka.Consumer, engine *s
 //
 //   - rawName:    "<pathPrefix>/<shard>/<uuid>.jpg"  (uploaded immediately)
 //   - targetName: "<pathPrefix>/<shard>/<uuid>.webp" (written by the image processor)
+// uuidNewV7 is a seam for tests; production code always uses uuid.NewV7.
+var uuidNewV7 = uuid.NewV7
+
+// newImageID generates a UUIDv7 for S3 object naming (time-ordered for
+// locality). A generation failure must not be swallowed: the zero UUID it
+// would otherwise produce collides across every image in the job, since
+// generateS3Keys derives both the shard and the object key from it (BUG-06).
+func newImageID() (string, error) {
+	id, err := uuidNewV7()
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+}
+
 func generateS3Keys(pathPrefix, imgID string) (rawName string, targetName string) {
 	shard := imgID[len(imgID)-2:]
 	if pathPrefix != "" {
