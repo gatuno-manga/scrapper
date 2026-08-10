@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/gatuno/scraper/internal/config"
@@ -125,13 +126,23 @@ func payloadFingerprint(payload []byte) string {
 // persisted to the DLQ topic, where it would otherwise sit in the clear for
 // the topic's retention period (OBS-03). Payloads that can't be parsed as a
 // JSON object are never stored raw — only their fingerprint is kept.
+//
+// Key matching is case-insensitive (strings.EqualFold), matching
+// encoding/json's own struct-unmarshal behavior: Unmarshal binds a JSON
+// object key to a struct field case-insensitively when no exact match
+// exists, so the application processes "WebsiteConfig", "websiteconfig",
+// etc. the same as "websiteConfig". An exact-match-only redaction here
+// would miss those variants and leak cookies/headers/proxy credentials to
+// the DLQ whenever the top-level Unmarshal failed for an unrelated reason.
 func redactPayload(payload []byte) string {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return payloadFingerprint(payload)
 	}
-	if _, ok := fields["websiteConfig"]; ok {
-		fields["websiteConfig"] = json.RawMessage(`"REDACTED"`)
+	for key := range fields {
+		if strings.EqualFold(key, "websiteConfig") {
+			fields[key] = json.RawMessage(`"REDACTED"`)
+		}
 	}
 	redacted, err := json.Marshal(fields)
 	if err != nil {

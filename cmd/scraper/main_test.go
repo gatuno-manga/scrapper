@@ -134,3 +134,25 @@ func TestRedactPayload_UnparseablePayloadFallsBackToFingerprint(t *testing.T) {
 		t.Fatalf("expected fallback to payloadFingerprint format, got %s", redacted)
 	}
 }
+
+// TestRedactPayload_CaseInsensitiveKeyMatch guards against a redaction
+// bypass: encoding/json's struct Unmarshal binds a JSON object key to a
+// struct field case-insensitively when no exact-case match exists, so the
+// application processes "WebsiteConfig" (or any other casing) exactly like
+// "websiteConfig". An earlier version of redactPayload did an exact-match
+// map lookup ("websiteConfig" only), so a payload using different casing
+// sailed through unredacted into the DLQ whenever the top-level Unmarshal
+// failed for an unrelated reason — the exact case the DLQ path exists for.
+func TestRedactPayload_CaseInsensitiveKeyMatch(t *testing.T) {
+	for _, key := range []string{"WebsiteConfig", "WEBSITECONFIG", "websiteconfig", "wEbSiTeConFig"} {
+		payload := `{"jobId":"job-1","` + key + `":{"cookies":[{"name":"session","value":"super-secret-session-token"}],"headers":{"Authorization":"Bearer top-secret-api-key"},"proxyUrl":"http://user:hunter2@proxy.example.com:8080"}}`
+
+		redacted := redactPayload([]byte(payload))
+
+		for _, secret := range []string{"super-secret-session-token", "top-secret-api-key", "hunter2"} {
+			if strings.Contains(redacted, secret) {
+				t.Fatalf("redactPayload leaked secret %q for key casing %q: %s", secret, key, redacted)
+			}
+		}
+	}
+}
