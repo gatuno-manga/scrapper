@@ -28,8 +28,11 @@ type Config struct {
 	KafkaWriteTimeout           int // seconds
 	KafkaReadTimeout            int // seconds
 	KafkaRequiredAcks           int
-	KafkaDebug                  bool
 	KafkaAllowAutoTopicCreation bool
+
+	// Logging
+	LogLevel  string // debug|info|warn|error, parsed via obs.ParseLevel
+	LogFormat string // "json" (production) or "text" (local dev)
 
 	// Kafka Topics
 	TopicChapterRequested string
@@ -110,11 +113,13 @@ func LoadConfig() Config {
 		KafkaWriteTimeout: writeTimeout,
 		KafkaReadTimeout:  readTimeout,
 		KafkaRequiredAcks: acks,
-		KafkaDebug:        os.Getenv("KAFKA_DEBUG") == "true",
 		// Defaults to false: an unrecognized TOPIC_* env var should fail
 		// loudly rather than silently create an unconsumed topic. Set to
 		// "true" only in dev compose environments that rely on it.
 		KafkaAllowAutoTopicCreation: os.Getenv("KAFKA_ALLOW_AUTO_TOPIC_CREATION") == "true",
+
+		LogLevel:  getEnv("LOG_LEVEL", "info"),
+		LogFormat: getEnv("LOG_FORMAT", "json"),
 
 		TopicChapterRequested: getEnv("TOPIC_CHAPTER_REQUESTED", "scraping.chapter.requested"),
 		TopicUpdateBookRequested: getEnv("TOPIC_UPDATE_BOOK_REQUESTED", "scraping.update-book.requested"),

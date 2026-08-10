@@ -25,9 +25,8 @@ import (
 )
 
 func main() {
-	obs.Setup(slog.LevelInfo, "json")
-
 	cfg := config.LoadConfig()
+	obs.Setup(obs.ParseLevel(cfg.LogLevel), cfg.LogFormat)
 
 	// Storage
 	slog.Info("initializing s3", "endpoint", cfg.S3Endpoint, "region", cfg.S3Region, "ssl", cfg.S3UseSSL)
@@ -106,7 +105,7 @@ func main() {
 // if delivery fails. Call sites must NOT silently discard the error.
 func publishOrLog(ctx context.Context, producer *kafka.Producer, topic string, msg interface{}) {
 	if err := producer.Publish(ctx, topic, msg); err != nil {
-		obs.From(ctx).Info("failed to publish", "topic", topic, "error", err)
+		obs.From(ctx).Error("failed to publish", "topic", topic, "error", err)
 	}
 }
 
@@ -115,7 +114,7 @@ func publishOrLog(ctx context.Context, producer *kafka.Producer, topic string, m
 // the same partition and downstream consumers observe them in order.
 func publishKeyedOrLog(ctx context.Context, producer *kafka.Producer, topic, key string, msg interface{}) {
 	if err := producer.PublishKeyed(ctx, topic, key, msg); err != nil {
-		obs.From(ctx).Info("failed to publish", "topic", topic, "error", err)
+		obs.From(ctx).Error("failed to publish", "topic", topic, "error", err)
 	}
 }
 
@@ -166,14 +165,14 @@ func sendToDLQ(ctx context.Context, producer *kafka.Producer, dlqTopic, original
 		Error:         reason.Error(),
 	}
 	if err := producer.Publish(ctx, dlqTopic, dlqMsg); err != nil {
-		obs.From(ctx).Info("failed to send message to dlq", "dlq_topic", dlqTopic, "error", err, "original_error", reason)
+		obs.From(ctx).Error("failed to send message to dlq", "dlq_topic", dlqTopic, "error", err, "original_error", reason)
 	}
 }
 
 // commitOrLog commits a Kafka message offset and logs a critical error on failure.
 func commitOrLog(ctx context.Context, consumer *kafka.Consumer, msg kafka.Message) {
 	if err := consumer.Commit(ctx, msg); err != nil {
-		obs.From(ctx).Info("failed to commit kafka offset", "error", err)
+		obs.From(ctx).Error("failed to commit kafka offset", "error", err)
 	}
 }
 
@@ -203,13 +202,13 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			if ctx.Err() != nil {
 				return
 			}
-			obs.From(ctx).Info("error fetching chapter message", "error", err)
+			obs.From(ctx).Warn("error fetching chapter message", "error", err)
 			continue
 		}
 
 		var req models.ScrapingChapterRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			obs.From(ctx).Info("error deserializing chapter message", "error", err, "payload", payloadFingerprint(msg.Value))
+			obs.From(ctx).Error("error deserializing chapter message", "error", err, "payload", payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicChapterRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -232,14 +231,14 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 			if err != nil {
-				obs.From(jobCtx).Info("failed to fetch website config", "error", err)
+				obs.From(jobCtx).Error("failed to fetch website config", "error", err)
 				sendToDLQ(jobCtx, producer, cfg.TopicDLQ, cfg.TopicChapterRequested, msg.Value, err)
 				return
 			}
 
 			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(jobCtx, req, wc)
 			if err != nil {
-				obs.From(jobCtx).Info("scrape failed", "error", err)
+				obs.From(jobCtx).Error("scrape failed", "error", err)
 				publishKeyedOrLog(jobCtx, producer, cfg.TopicChapterFailed, req.ChapterID, models.ScrapingChapterFailed{
 					JobID:     req.JobID,
 					ChapterID: req.ChapterID,
@@ -274,23 +273,23 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			for r := range results {
 				if r.Error != nil {
-					obs.From(jobCtx).Info("image download failed", "image_index", r.Index, "error", r.Error)
+					obs.From(jobCtx).Debug("image download failed", "image_index", r.Index, "error", r.Error)
 					continue
 				}
 
 				// Generate unique ID for the image (UUIDv7 for better time-sorting/locality)
 				imgID, err := newImageID()
 				if err != nil {
-					obs.From(jobCtx).Info("failed to generate image id", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Warn("failed to generate image id", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
 
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
-				obs.From(jobCtx).Info("attempting upload", "image_index", r.Index, "bucket", req.UploadTarget.Bucket, "object", rawName, "bytes", len(r.Data))
+				obs.From(jobCtx).Debug("attempting upload", "image_index", r.Index, "bucket", req.UploadTarget.Bucket, "object", rawName, "bytes", len(r.Data))
 				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
-					obs.From(jobCtx).Info("upload failed", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Error("upload failed", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
@@ -349,13 +348,13 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 			if ctx.Err() != nil {
 				return
 			}
-			obs.From(ctx).Info("error fetching update-book message", "error", err)
+			obs.From(ctx).Warn("error fetching update-book message", "error", err)
 			continue
 		}
 
 		var req models.ScrapingUpdateBookRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			obs.From(ctx).Info("error deserializing update-book message", "error", err, "payload", payloadFingerprint(msg.Value))
+			obs.From(ctx).Error("error deserializing update-book message", "error", err, "payload", payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -373,7 +372,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
-			obs.From(jobCtx).Info("failed to fetch website config", "error", err, "payload", payloadFingerprint(msg.Value))
+			obs.From(jobCtx).Error("failed to fetch website config", "error", err, "payload", payloadFingerprint(msg.Value))
 			sendToDLQ(jobCtx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
 			commitOrLog(jobCtx, consumer, msg)
 			continue
@@ -381,7 +380,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		result, err := engine.ScrapeUpdateBook(jobCtx, req, wc)
 		if err != nil {
-			obs.From(jobCtx).Info("update book scrape failed", "error", err)
+			obs.From(jobCtx).Error("update book scrape failed", "error", err)
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicBookFailed, req.BookID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
 				BookID:  req.BookID,
@@ -406,13 +405,13 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			if ctx.Err() != nil {
 				return
 			}
-			obs.From(ctx).Info("error fetching new-book message", "error", err)
+			obs.From(ctx).Warn("error fetching new-book message", "error", err)
 			continue
 		}
 
 		var req models.ScrapingNewBookRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			obs.From(ctx).Info("error deserializing new-book message", "error", err, "payload", payloadFingerprint(msg.Value))
+			obs.From(ctx).Error("error deserializing new-book message", "error", err, "payload", payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicNewBookRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -429,7 +428,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
-			obs.From(jobCtx).Info("failed to fetch website config", "error", err)
+			obs.From(jobCtx).Error("failed to fetch website config", "error", err)
 			sendToDLQ(jobCtx, producer, cfg.TopicDLQ, cfg.TopicNewBookRequested, msg.Value, err)
 			commitOrLog(jobCtx, consumer, msg)
 			continue
@@ -437,7 +436,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		result, err := engine.ScrapeNewBook(jobCtx, req, wc)
 		if err != nil {
-			obs.From(jobCtx).Info("new book scrape failed", "error", err)
+			obs.From(jobCtx).Error("new book scrape failed", "error", err)
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicBookFailed, req.JobID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
 				Error:   "SCRAPE_FAILED",
@@ -462,13 +461,13 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			if ctx.Err() != nil {
 				return
 			}
-			obs.From(ctx).Info("error reading covers message", "error", err)
+			obs.From(ctx).Warn("error reading covers message", "error", err)
 			continue
 		}
 
 		var req models.ScrapingCoversRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			obs.From(ctx).Info("error unmarshaling covers message", "error", err, "payload", payloadFingerprint(msg.Value))
+			obs.From(ctx).Error("error unmarshaling covers message", "error", err, "payload", payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicCoversRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -486,7 +485,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
-			obs.From(jobCtx).Info("failed to fetch website config", "error", err)
+			obs.From(jobCtx).Error("failed to fetch website config", "error", err)
 			sendToDLQ(jobCtx, producer, cfg.TopicDLQ, cfg.TopicCoversRequested, msg.Value, err)
 			commitOrLog(jobCtx, consumer, msg)
 			continue
@@ -501,21 +500,21 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			s3Paths := make([]string, 0, len(req.Covers))
 			for r := range results {
 				if r.Error != nil {
-					obs.From(jobCtx).Info("cover download failed", "image_index", r.Index, "error", r.Error)
+					obs.From(jobCtx).Debug("cover download failed", "image_index", r.Index, "error", r.Error)
 					continue
 				}
 
 				// Path pattern: <prefix>/<shard>/<uuid>.jpg
 				imgID, err := newImageID()
 				if err != nil {
-					obs.From(jobCtx).Info("failed to generate cover id", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Warn("failed to generate cover id", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
-					obs.From(jobCtx).Info("cover upload failed", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Error("cover upload failed", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
@@ -555,13 +554,13 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			if ctx.Err() != nil {
 				return
 			}
-			obs.From(ctx).Info("error reading images message", "error", err)
+			obs.From(ctx).Warn("error reading images message", "error", err)
 			continue
 		}
 
 		var req models.ScrapingImagesRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			obs.From(ctx).Info("error unmarshaling images message", "error", err, "payload", payloadFingerprint(msg.Value))
+			obs.From(ctx).Error("error unmarshaling images message", "error", err, "payload", payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicImagesRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -579,7 +578,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
-			obs.From(jobCtx).Info("failed to fetch website config", "error", err)
+			obs.From(jobCtx).Error("failed to fetch website config", "error", err)
 			sendToDLQ(jobCtx, producer, cfg.TopicDLQ, cfg.TopicImagesRequested, msg.Value, err)
 			commitOrLog(jobCtx, consumer, msg)
 			continue
@@ -595,20 +594,20 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			count := 0
 			for r := range results {
 				if r.Error != nil {
-					obs.From(jobCtx).Info("image download failed", "image_index", r.Index, "error", r.Error)
+					obs.From(jobCtx).Debug("image download failed", "image_index", r.Index, "error", r.Error)
 					continue
 				}
 
 				imgID, err := newImageID()
 				if err != nil {
-					obs.From(jobCtx).Info("failed to generate image id", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Warn("failed to generate image id", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
-					obs.From(jobCtx).Info("image upload failed", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Error("image upload failed", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
@@ -651,7 +650,7 @@ func handleTestRequests(ctx context.Context, consumer *kafka.Consumer, engine *s
 			if ctx.Err() != nil {
 				return
 			}
-			obs.From(ctx).Info("error fetching test message", "error", err)
+			obs.From(ctx).Warn("error fetching test message", "error", err)
 			continue
 		}
 

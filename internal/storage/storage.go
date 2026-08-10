@@ -62,6 +62,6 @@ func (s *S3Client) Upload(ctx context.Context, bucketName, objectName string, da
 		return "", fmt.Errorf("failed to upload object: %w", err)
 	}
 
-	obs.From(ctx).Info("successfully uploaded to s3", "bucket", bucketName, "object", objectName)
+	obs.From(ctx).Debug("successfully uploaded to s3", "bucket", bucketName, "object", objectName)
 	return fmt.Sprintf("%s/%s", bucketName, objectName), nil
 }

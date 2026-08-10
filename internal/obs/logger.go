@@ -27,6 +27,17 @@ func Setup(level slog.Level, format string) *slog.Logger {
 	return l
 }
 
+// ParseLevel parses a LOG_LEVEL value ("debug", "info", "warn", "error",
+// case-insensitive) into a slog.Level, defaulting to Info for an empty or
+// unrecognized value so a typo'd env var doesn't crash startup.
+func ParseLevel(s string) slog.Level {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(s)); err != nil {
+		return slog.LevelInfo
+	}
+	return level
+}
+
 // With attaches a logger to ctx so downstream packages inherit job context.
 func With(ctx context.Context, l *slog.Logger) context.Context {
 	return context.WithValue(ctx, ctxKey{}, l)

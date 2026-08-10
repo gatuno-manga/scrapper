@@ -57,4 +57,33 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.S3Endpoint != "localhost:9000" {
 		t.Errorf("Expected default S3 endpoint localhost:9000, got %s", cfg.S3Endpoint)
 	}
+
+	if cfg.LogLevel != "info" {
+		t.Errorf("Expected default log level info, got %s", cfg.LogLevel)
+	}
+
+	if cfg.LogFormat != "json" {
+		t.Errorf("Expected default log format json, got %s", cfg.LogFormat)
+	}
+}
+
+// TestLoadConfig_LogLevelAndFormat guards OBS-02: LOG_LEVEL and LOG_FORMAT
+// must be read from the environment so operators can raise verbosity for an
+// investigation, or switch to text output for local dev, without a rebuild.
+func TestLoadConfig_LogLevelAndFormat(t *testing.T) {
+	os.Setenv("LOG_LEVEL", "debug")
+	os.Setenv("LOG_FORMAT", "text")
+	defer func() {
+		os.Unsetenv("LOG_LEVEL")
+		os.Unsetenv("LOG_FORMAT")
+	}()
+
+	cfg := LoadConfig()
+
+	if cfg.LogLevel != "debug" {
+		t.Errorf("Expected log level debug, got %s", cfg.LogLevel)
+	}
+	if cfg.LogFormat != "text" {
+		t.Errorf("Expected log format text, got %s", cfg.LogFormat)
+	}
 }

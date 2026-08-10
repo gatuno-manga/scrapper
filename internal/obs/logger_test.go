@@ -36,6 +36,34 @@ func TestFrom_FallsBackToDefaultWhenNoneAttached(t *testing.T) {
 	}
 }
 
+// TestParseLevel_ValidValues guards OBS-02's LOG_LEVEL contract: operators
+// must be able to raise verbosity for an investigation without a rebuild.
+func TestParseLevel_ValidValues(t *testing.T) {
+	cases := map[string]slog.Level{
+		"debug": slog.LevelDebug,
+		"DEBUG": slog.LevelDebug,
+		"info":  slog.LevelInfo,
+		"warn":  slog.LevelWarn,
+		"error": slog.LevelError,
+	}
+	for input, want := range cases {
+		if got := ParseLevel(input); got != want {
+			t.Errorf("ParseLevel(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+// TestParseLevel_InvalidValueDefaultsToInfo guards against a typo'd
+// LOG_LEVEL crashing startup or silently going to the most verbose level;
+// Info is the same safe default LoadConfig itself falls back to.
+func TestParseLevel_InvalidValueDefaultsToInfo(t *testing.T) {
+	for _, input := range []string{"", "verbose", "trace", "not-a-level"} {
+		if got := ParseLevel(input); got != slog.LevelInfo {
+			t.Errorf("ParseLevel(%q) = %v, want %v (default)", input, got, slog.LevelInfo)
+		}
+	}
+}
+
 func TestSetup_SetsProcessDefaultLogger(t *testing.T) {
 	l := Setup(slog.LevelInfo, "json")
 	if slog.Default() != l {
@@ -86,5 +114,30 @@ func TestJobScopedLogger_EveryRecordCarriesJobID(t *testing.T) {
 		if record["chapter_id"] != "chapter-456" {
 			t.Fatalf("expected chapter_id=chapter-456 in every record, got %v in %q", record["chapter_id"], line)
 		}
+	}
+}
+
+// TestSetup_LevelFiltersRecords guards OBS-02's actual pain point: "verbose
+// per-image logging cannot be suppressed in production" because every log
+// call used the package-level log.Printf at one implicit level. With slog
+// levels wired to LOG_LEVEL, raising the configured level must suppress
+// lower-severity records (e.g. the Debug-level per-image upload/cache-hit
+// noise) while still emitting Warn/Error.
+func TestSetup_LevelFiltersRecords(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := slog.New(h)
+
+	logger.Debug("per-image upload attempt")
+	logger.Info("chapter completed")
+	logger.Warn("scroll failed")
+	logger.Error("upload failed")
+
+	out := buf.String()
+	if strings.Contains(out, "per-image upload attempt") || strings.Contains(out, "chapter completed") {
+		t.Fatalf("expected Debug/Info records to be suppressed at LevelWarn, got: %s", out)
+	}
+	if !strings.Contains(out, "scroll failed") || !strings.Contains(out, "upload failed") {
+		t.Fatalf("expected Warn/Error records to pass through at LevelWarn, got: %s", out)
 	}
 }
