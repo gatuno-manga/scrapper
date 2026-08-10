@@ -25,10 +25,11 @@ type Config struct {
 	RedisPassword   string
 
 	// Kafka General
-	KafkaWriteTimeout int // seconds
-	KafkaReadTimeout  int // seconds
-	KafkaRequiredAcks int
-	KafkaDebug        bool
+	KafkaWriteTimeout           int // seconds
+	KafkaReadTimeout            int // seconds
+	KafkaRequiredAcks           int
+	KafkaDebug                  bool
+	KafkaAllowAutoTopicCreation bool
 
 	// Kafka Topics
 	TopicChapterRequested string
@@ -110,6 +111,10 @@ func LoadConfig() Config {
 		KafkaReadTimeout:  readTimeout,
 		KafkaRequiredAcks: acks,
 		KafkaDebug:        os.Getenv("KAFKA_DEBUG") == "true",
+		// Defaults to false: an unrecognized TOPIC_* env var should fail
+		// loudly rather than silently create an unconsumed topic. Set to
+		// "true" only in dev compose environments that rely on it.
+		KafkaAllowAutoTopicCreation: os.Getenv("KAFKA_ALLOW_AUTO_TOPIC_CREATION") == "true",
 
 		TopicChapterRequested: getEnv("TOPIC_CHAPTER_REQUESTED", "scraping.chapter.requested"),
 		TopicUpdateBookRequested: getEnv("TOPIC_UPDATE_BOOK_REQUESTED", "scraping.update-book.requested"),

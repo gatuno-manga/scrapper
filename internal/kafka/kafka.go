@@ -12,6 +12,10 @@ import (
 // Using this interface instead of *Producer makes handlers testable via mocks.
 type Publisher interface {
 	Publish(ctx context.Context, topic string, message interface{}) error
+	// PublishKeyed publishes with an explicit partition key so that
+	// entity-scoped events (e.g. all events for one chapterId) land on the
+	// same partition and are read back in publish order.
+	PublishKeyed(ctx context.Context, topic, key string, message interface{}) error
 	Close() error
 }
 
@@ -39,28 +43,49 @@ type Producer struct {
 	writer *kafka.Writer
 }
 
-func NewProducer(brokers []string, writeTimeout int, acks int) *Producer {
+func NewProducer(brokers []string, writeTimeout int, acks int, allowAutoTopicCreation bool) *Producer {
 	return &Producer{
 		writer: &kafka.Writer{
-			Addr:                   kafka.TCP(brokers...),
-			Balancer:               &kafka.LeastBytes{},
+			Addr: kafka.TCP(brokers...),
+			// Hash routes by Message.Key when present and falls back to
+			// round-robin when Key is nil, so unkeyed callers are unaffected.
+			Balancer:               &kafka.Hash{},
 			WriteTimeout:           time.Duration(writeTimeout) * time.Second,
 			RequiredAcks:           kafka.RequiredAcks(acks),
-			AllowAutoTopicCreation: true,
+			AllowAutoTopicCreation: allowAutoTopicCreation,
 		},
 	}
 }
 
 func (p *Producer) Publish(ctx context.Context, topic string, message interface{}) error {
+	return p.PublishKeyed(ctx, topic, "", message)
+}
+
+// PublishKeyed publishes a message with an explicit partition key. Messages
+// sharing a key land on the same partition, which preserves their relative
+// order for downstream consumers. An empty key falls back to the writer's
+// default (round-robin) partitioning.
+func (p *Producer) PublishKeyed(ctx context.Context, topic, key string, message interface{}) error {
 	payload, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
 
-	return p.writer.WriteMessages(ctx, kafka.Message{
+	return p.writer.WriteMessages(ctx, keyedMessage(topic, key, payload))
+}
+
+// keyedMessage builds the outgoing kafka.Message, leaving Key nil for an
+// empty key so unkeyed publishes keep the writer's default round-robin
+// partitioning instead of hashing an empty string.
+func keyedMessage(topic, key string, payload []byte) kafka.Message {
+	msg := kafka.Message{
 		Topic: topic,
 		Value: payload,
-	})
+	}
+	if key != "" {
+		msg.Key = []byte(key)
+	}
+	return msg
 }
 
 func (p *Producer) Close() error {

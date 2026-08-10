@@ -55,7 +55,7 @@ func main() {
 	engine := scraper.NewScraper(pool, cfg.CacheMaxSizeMB*1024*1024, limiter, semaphore)
 
 	// Kafka
-	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks)
+	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks, cfg.KafkaAllowAutoTopicCreation)
 	defer producer.Close()
 
 	chapterConsumer := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaGroupID+"-chapter", cfg.TopicChapterRequested, cfg.KafkaReadTimeout)
@@ -97,6 +97,15 @@ func main() {
 // if delivery fails. Call sites must NOT silently discard the error.
 func publishOrLog(ctx context.Context, producer *kafka.Producer, topic string, msg interface{}) {
 	if err := producer.Publish(ctx, topic, msg); err != nil {
+		log.Printf("CRITICAL: failed to publish to topic %s: %v", topic, err)
+	}
+}
+
+// publishKeyedOrLog is publishOrLog with an explicit partition key. Use it
+// for events scoped to the same entity (chapter/book/job) so they land on
+// the same partition and downstream consumers observe them in order.
+func publishKeyedOrLog(ctx context.Context, producer *kafka.Producer, topic, key string, msg interface{}) {
+	if err := producer.PublishKeyed(ctx, topic, key, msg); err != nil {
 		log.Printf("CRITICAL: failed to publish to topic %s: %v", topic, err)
 	}
 }
@@ -176,7 +185,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(ctx, req, wc)
 			if err != nil {
 				log.Printf("Scrape failed: %v", err)
-				publishOrLog(ctx, producer, cfg.TopicChapterFailed, models.ScrapingChapterFailed{
+				publishKeyedOrLog(ctx, producer, cfg.TopicChapterFailed, req.ChapterID, models.ScrapingChapterFailed{
 					JobID:     req.JobID,
 					ChapterID: req.ChapterID,
 					Error:     "SCRAPE_FAILED",
@@ -194,7 +203,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				})
 			}
 
-			publishOrLog(ctx, producer, cfg.TopicChapterPagesExtracted, models.ScrapingChapterPagesExtracted{
+			publishKeyedOrLog(ctx, producer, cfg.TopicChapterPagesExtracted, req.ChapterID, models.ScrapingChapterPagesExtracted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
 				ScrapedTitle: title,
@@ -264,7 +273,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				scImages = append(scImages, pi.Image)
 			}
 
-			publishOrLog(ctx, producer, cfg.TopicChapterCompleted, models.ScrapingChapterCompleted{
+			publishKeyedOrLog(ctx, producer, cfg.TopicChapterCompleted, req.ChapterID, models.ScrapingChapterCompleted{
 				JobID:        req.JobID,
 				ChapterID:    req.ChapterID,
 				ScrapedTitle: title,
@@ -310,7 +319,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 		result, err := engine.ScrapeUpdateBook(ctx, req, wc)
 		if err != nil {
 			log.Printf("Update book scrape failed: %v", err)
-			publishOrLog(ctx, producer, cfg.TopicBookFailed, models.ScrapingBookFailed{
+			publishKeyedOrLog(ctx, producer, cfg.TopicBookFailed, req.BookID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
 				BookID:  req.BookID,
 				Error:   "SCRAPE_FAILED",
@@ -320,7 +329,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 			continue
 		}
 
-		publishOrLog(ctx, producer, cfg.TopicUpdateBookCompleted, result)
+		publishKeyedOrLog(ctx, producer, cfg.TopicUpdateBookCompleted, req.BookID, result)
 		log.Printf("Update book completed: %s", req.BookID)
 		commitOrLog(ctx, consumer, msg)
 	}
@@ -359,7 +368,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 		result, err := engine.ScrapeNewBook(ctx, req, wc)
 		if err != nil {
 			log.Printf("New book scrape failed: %v", err)
-			publishOrLog(ctx, producer, cfg.TopicBookFailed, models.ScrapingBookFailed{
+			publishKeyedOrLog(ctx, producer, cfg.TopicBookFailed, req.JobID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
 				Error:   "SCRAPE_FAILED",
 				Message: err.Error(),
@@ -368,7 +377,8 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			continue
 		}
 
-		publishOrLog(ctx, producer, cfg.TopicBookCompleted, result)
+		// No BookID exists yet for a new book, so key on JobID instead.
+		publishKeyedOrLog(ctx, producer, cfg.TopicBookCompleted, req.JobID, result)
 		log.Printf("New book completed (Job: %s)", req.JobID)
 		commitOrLog(ctx, consumer, msg)
 	}
@@ -448,7 +458,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			}
 
 			// Emit final completion event
-			publishOrLog(ctx, producer, cfg.TopicCoversCompleted, models.ScrapingCoversCompleted{
+			publishKeyedOrLog(ctx, producer, cfg.TopicCoversCompleted, req.JobID, models.ScrapingCoversCompleted{
 				JobID:        req.JobID,
 				BookID:       req.BookID,
 				Results:      s3Paths,
@@ -534,7 +544,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			}
 
 			// Emit final completion event for Images batch
-			publishOrLog(ctx, producer, cfg.TopicImagesCompleted, models.ScrapingImagesCompleted{
+			publishKeyedOrLog(ctx, producer, cfg.TopicImagesCompleted, req.JobID, models.ScrapingImagesCompleted{
 				JobID:        req.JobID,
 				EntityID:     req.EntityID,
 				Source:       "CHAPTER",

@@ -13,7 +13,7 @@ import (
 
 func main() {
 	cfg := config.LoadConfig()
-	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks)
+	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks, cfg.KafkaAllowAutoTopicCreation)
 	defer producer.Close()
 
 	// Raw JSON from user
