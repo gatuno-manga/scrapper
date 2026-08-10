@@ -151,7 +151,7 @@ func (p *BrowserPool) Acquire(ctx context.Context) (playwright.BrowserContext, e
 	}
 }
 
-func (p *BrowserPool) NewContextWithOpts(opts playwright.BrowserNewContextOptions) (playwright.BrowserContext, error) {
+func (p *BrowserPool) NewContextWithOpts(ctx context.Context, opts playwright.BrowserNewContextOptions) (playwright.BrowserContext, error) {
 	// Inject required stealth/bypass options if not provided
 	if opts.BypassCSP == nil {
 		opts.BypassCSP = playwright.Bool(true)
@@ -173,8 +173,8 @@ func (p *BrowserPool) NewContextWithOpts(opts playwright.BrowserNewContextOption
 			return nil, err
 		}
 		return bCtx, nil
-	default:
-		return nil, fmt.Errorf("browser pool at maximum capacity")
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 

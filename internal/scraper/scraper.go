@@ -84,11 +84,9 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 
 	var bCtx playwright.BrowserContext
-	isCustomContext := false
 
 	customUA := config.Headers["User-Agent"]
 	if config.ProxyURL != "" || customUA != "" {
-		isCustomContext = true
 		opts := playwright.BrowserNewContextOptions{}
 		if config.ProxyURL != "" {
 			opts.Proxy = &playwright.Proxy{
@@ -98,7 +96,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		if customUA != "" {
 			opts.UserAgent = playwright.String(customUA)
 		}
-		bCtx, err = s.pool.NewContextWithOpts(opts)
+		bCtx, err = s.pool.NewContextWithOpts(ctx, opts)
 	} else {
 		bCtx, err = s.pool.Acquire(ctx)
 	}
@@ -109,11 +107,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 
 	cleanup := func() {
-		if !isCustomContext {
-			s.pool.Release(bCtx)
-		} else {
-			bCtx.Close()
-		}
+		s.pool.Release(bCtx)
 		releaseSem()
 	}
 
