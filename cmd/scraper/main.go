@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -110,12 +112,40 @@ func publishKeyedOrLog(ctx context.Context, producer *kafka.Producer, topic, key
 	}
 }
 
+// payloadFingerprint summarizes a Kafka payload for logging without ever
+// exposing its content. Request payloads embed WebsiteConfig, which carries
+// live session cookies, Authorization headers and proxy credentials
+// (OBS-03) that must never reach stdout or a log aggregator.
+func payloadFingerprint(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("sha256:%s bytes:%d", hex.EncodeToString(sum[:8]), len(payload))
+}
+
+// redactPayload strips the websiteConfig field before a payload is
+// persisted to the DLQ topic, where it would otherwise sit in the clear for
+// the topic's retention period (OBS-03). Payloads that can't be parsed as a
+// JSON object are never stored raw — only their fingerprint is kept.
+func redactPayload(payload []byte) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return payloadFingerprint(payload)
+	}
+	if _, ok := fields["websiteConfig"]; ok {
+		fields["websiteConfig"] = json.RawMessage(`"REDACTED"`)
+	}
+	redacted, err := json.Marshal(fields)
+	if err != nil {
+		return payloadFingerprint(payload)
+	}
+	return string(redacted)
+}
+
 // sendToDLQ routes an unprocessable message to the dead-letter queue topic so
 // it can be inspected and replayed later without blocking the main consumer.
 func sendToDLQ(ctx context.Context, producer *kafka.Producer, dlqTopic, originalTopic string, payload []byte, reason error) {
 	dlqMsg := models.DeadLetterMessage{
 		OriginalTopic: originalTopic,
-		Payload:       string(payload),
+		Payload:       redactPayload(payload),
 		Error:         reason.Error(),
 	}
 	if err := producer.Publish(ctx, dlqTopic, dlqMsg); err != nil {
@@ -162,7 +192,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		var req models.ScrapingChapterRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			log.Printf("Error deserializing chapter message: %v | Raw: %s", err, string(msg.Value))
+			log.Printf("Error deserializing chapter message: %v | Payload: %s", err, payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicChapterRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -300,7 +330,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		var req models.ScrapingUpdateBookRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			log.Printf("Error deserializing update-book message: %v | Raw: %s", err, string(msg.Value))
+			log.Printf("Error deserializing update-book message: %v | Payload: %s", err, payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -310,7 +340,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 		
 		wc, err := fetchWebsiteConfig(ctx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
-			log.Printf("Failed to fetch website config: %v | Raw Message: %s", err, string(msg.Value))
+			log.Printf("Failed to fetch website config: %v | Payload: %s", err, payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicUpdateBookRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -349,7 +379,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		var req models.ScrapingNewBookRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			log.Printf("Error deserializing new-book message: %v | Raw: %s", err, string(msg.Value))
+			log.Printf("Error deserializing new-book message: %v | Payload: %s", err, payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicNewBookRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -398,7 +428,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		var req models.ScrapingCoversRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			log.Printf("Error unmarshaling covers message: %v | Raw: %s", err, string(msg.Value))
+			log.Printf("Error unmarshaling covers message: %v | Payload: %s", err, payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicCoversRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue
@@ -483,7 +513,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		var req models.ScrapingImagesRequest
 		if err := json.Unmarshal(msg.Value, &req); err != nil {
-			log.Printf("Error unmarshaling images message: %v | Raw: %s", err, string(msg.Value))
+			log.Printf("Error unmarshaling images message: %v | Payload: %s", err, payloadFingerprint(msg.Value))
 			sendToDLQ(ctx, producer, cfg.TopicDLQ, cfg.TopicImagesRequested, msg.Value, err)
 			commitOrLog(ctx, consumer, msg)
 			continue

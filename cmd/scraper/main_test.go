@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -63,5 +64,73 @@ func TestGenerateS3Keys_ZeroUUIDCollision(t *testing.T) {
 
 	if raw1 != raw2 || target1 != target2 {
 		t.Fatalf("expected identical keys to illustrate the collision, got (%s,%s) vs (%s,%s)", raw1, target1, raw2, target2)
+	}
+}
+
+// secretBearingPayload mirrors a real chapter/covers/images request: it
+// embeds a websiteConfig carrying a live session cookie, an Authorization
+// header and a credentialed proxy URL — exactly the fields OBS-03 flags as
+// unsafe to log or persist to the DLQ in the clear.
+const secretBearingPayload = `{
+	"jobId": "job-1",
+	"chapterId": "chapter-1",
+	"targetUrl": "https://example.com/chapter-1",
+	"websiteConfig": {
+		"cookies": [{"name": "session", "value": "super-secret-session-token"}],
+		"headers": {"Authorization": "Bearer top-secret-api-key"},
+		"proxyUrl": "http://user:hunter2@proxy.example.com:8080"
+	}
+}`
+
+// TestPayloadFingerprint_NeverLeaksPayloadContent guards against OBS-03: a
+// deserialization-failure log line must never contain the raw payload,
+// since it embeds cookies, auth headers and proxy credentials.
+func TestPayloadFingerprint_NeverLeaksPayloadContent(t *testing.T) {
+	fp := payloadFingerprint([]byte(secretBearingPayload))
+
+	for _, secret := range []string{"super-secret-session-token", "top-secret-api-key", "hunter2"} {
+		if strings.Contains(fp, secret) {
+			t.Fatalf("payloadFingerprint leaked secret %q: %s", secret, fp)
+		}
+	}
+	if !strings.HasPrefix(fp, "sha256:") {
+		t.Fatalf("expected fingerprint to start with sha256:, got %s", fp)
+	}
+}
+
+// TestRedactPayload_StripsWebsiteConfig guards against OBS-03: the DLQ
+// payload must never carry cookies, Authorization headers or proxy
+// credentials, since DLQ messages persist for the topic's retention period
+// and are readable by anyone with topic access.
+func TestRedactPayload_StripsWebsiteConfig(t *testing.T) {
+	redacted := redactPayload([]byte(secretBearingPayload))
+
+	for _, secret := range []string{"super-secret-session-token", "top-secret-api-key", "hunter2"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("redactPayload leaked secret %q: %s", secret, redacted)
+		}
+	}
+	// Non-sensitive fields needed to identify/replay the job must survive.
+	for _, want := range []string{"job-1", "chapter-1"} {
+		if !strings.Contains(redacted, want) {
+			t.Fatalf("redactPayload dropped non-sensitive field %q: %s", want, redacted)
+		}
+	}
+}
+
+// TestRedactPayload_UnparseablePayloadFallsBackToFingerprint guards the DLQ
+// path used when json.Unmarshal itself failed (the common DLQ case per
+// OBS-03): an unparseable payload must never be stored raw, since we can't
+// selectively strip fields from something that isn't valid JSON.
+func TestRedactPayload_UnparseablePayloadFallsBackToFingerprint(t *testing.T) {
+	garbage := []byte(`not valid json { "cookie": "super-secret-session-token"`)
+
+	redacted := redactPayload(garbage)
+
+	if strings.Contains(redacted, "super-secret-session-token") {
+		t.Fatalf("redactPayload leaked secret from unparseable payload: %s", redacted)
+	}
+	if !strings.HasPrefix(redacted, "sha256:") {
+		t.Fatalf("expected fallback to payloadFingerprint format, got %s", redacted)
 	}
 }
