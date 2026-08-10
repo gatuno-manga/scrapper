@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gatuno/scraper/internal/models"
+	"github.com/gatuno/scraper/internal/obs"
 	"github.com/gatuno/scraper/internal/ratelimit"
 	"github.com/mxschmitt/playwright-go"
 )
@@ -125,7 +125,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
 		cleanup()
 		return "", nil, nil, func() {}, err
 	}
@@ -140,7 +140,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		scrapedTitle, _ = page.Title()
 	}
 
-	log.Printf("Starting count-based scroll for lazy-loaded images...")
+	obs.From(ctx).Info("starting count-based scroll for lazy-loaded images")
 	// Aggressive Scroll (Count-based)
 	imagesSelector := config.Selector
 	if req.ChapterSpecificSelector != "" {
@@ -158,7 +158,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		"imageSelector":   imagesSelector,
 	})
 	if err != nil {
-		log.Printf("Scroll failed: %v", err)
+		obs.From(ctx).Info("scroll failed", "error", err)
 	}
 
 	// Execute PosScript
@@ -172,7 +172,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		cleanup()
 		return "", nil, nil, func() {}, err
 	}
-	log.Printf("Found %d images via selectors", count)
+	obs.From(ctx).Info("found images via selectors", "count", count)
 
 	imageUrls := make([]string, 0, count)
 	for i := 0; i < count; i++ {
@@ -292,9 +292,9 @@ func (s *Scraper) ScrapeBatchImages(ctx context.Context, page playwright.Page, c
 								results <- ImageResult{Index: j.index, Data: data}
 								continue // Success via browser APIRequest
 							}
-							log.Printf("Browser APIRequest status %d for %s (Error: %v)", resp.Status(), j.url, err)
+							obs.From(ctx).Info("browser api request non-200", "status", resp.Status(), "url", j.url, "error", err)
 						} else {
-							log.Printf("Browser APIRequest failed for %s: %v. Falling back to HTTP client.", j.url, err)
+							obs.From(ctx).Info("browser api request failed, falling back to http client", "url", j.url, "error", err)
 						}
 					}
 
@@ -414,7 +414,7 @@ func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (model
 	}
 	defer page.Close()
 
-	if err := s.preparePage(page, bCtx, in.WebsiteConfig, in.TargetURL, nil); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, in.WebsiteConfig, in.TargetURL, nil); err != nil {
 		return models.ScrapingBookCompleted{}, err
 	}
 
@@ -433,19 +433,19 @@ func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (model
 
 	res, err := page.Evaluate(in.Script)
 	if err != nil {
-		log.Printf("ERROR: Script evaluation failed for %s: %v", in.TargetURL, err)
+		obs.From(ctx).Info("script evaluation failed", "target_url", in.TargetURL, "error", err)
 		return models.ScrapingBookCompleted{}, err
 	}
 
 	data, err := json.Marshal(res)
 	if err != nil {
-		log.Printf("ERROR: Failed to marshal script result for %s: %v", in.TargetURL, err)
+		obs.From(ctx).Info("failed to marshal script result", "target_url", in.TargetURL, "error", err)
 		return models.ScrapingBookCompleted{}, err
 	}
 
 	var result models.ScrapingBookCompleted
 	if err := json.Unmarshal(data, &result); err != nil {
-		log.Printf("ERROR: Failed to unmarshal script result for %s: %v. Raw: %s", in.TargetURL, err, string(data))
+		obs.From(ctx).Info("failed to unmarshal script result", "target_url", in.TargetURL, "error", err, "raw", string(data))
 		return models.ScrapingBookCompleted{}, err
 	}
 
@@ -455,9 +455,9 @@ func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (model
 	}
 
 	if result.Chapters.Len() == 0 {
-		log.Printf("WARNING: No chapters extracted for %s. Page Title: %s", in.TargetURL, result.Title)
+		obs.From(ctx).Info("no chapters extracted", "target_url", in.TargetURL, "page_title", result.Title)
 		bodySnippet, _ := page.Evaluate(`document.body.innerText.substring(0, 500)`)
-		log.Printf("Page Body Snippet: %v", bodySnippet)
+		obs.From(ctx).Info("page body snippet", "target_url", in.TargetURL, "snippet", bodySnippet)
 	}
 
 	result.JobID = in.JobID
@@ -486,7 +486,7 @@ func (s *Scraper) ScrapeUpdateBook(ctx context.Context, req models.ScrapingUpdat
 	if err != nil {
 		return result, err
 	}
-	log.Printf("Book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, result.Chapters.Len(), len(result.Covers))
+	obs.From(ctx).Info("book info extracted", "title", result.Title, "chapters", result.Chapters.Len(), "covers", len(result.Covers))
 	return result, nil
 }
 
@@ -508,7 +508,7 @@ func (s *Scraper) ScrapeNewBook(ctx context.Context, req models.ScrapingNewBookR
 	if err != nil {
 		return result, err
 	}
-	log.Printf("New book info extracted: %s (Chapters: %d, Covers: %d)", result.Title, result.Chapters.Len(), len(result.Covers))
+	obs.From(ctx).Info("new book info extracted", "title", result.Title, "chapters", result.Chapters.Len(), "covers", len(result.Covers))
 	return result, nil
 }
 
@@ -542,7 +542,7 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
 		releaseSem()
@@ -598,7 +598,7 @@ func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesReq
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(page, bCtx, config, targetURL, interceptedImages); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, config, targetURL, interceptedImages); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
 		releaseSem()
@@ -635,14 +635,14 @@ func (s *Scraper) ExecuteTestScript(ctx context.Context, req models.ScrapingTest
 	}
 	defer page.Close()
 
-	if err := s.preparePage(page, bCtx, models.WebsiteConfig{}, req.TargetURL, nil); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, models.WebsiteConfig{}, req.TargetURL, nil); err != nil {
 		return nil, err
 	}
 
 	return page.Evaluate(req.Script)
 }
 
-func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserContext, config models.WebsiteConfig, targetURL string, interceptedImages *sync.Map) error {
+func (s *Scraper) preparePage(ctx context.Context, page playwright.Page, bCtx playwright.BrowserContext, config models.WebsiteConfig, targetURL string, interceptedImages *sync.Map) error {
 	// Add console listener with noise filtering
 	page.On("console", func(msg playwright.ConsoleMessage) {
 		text := msg.Text()
@@ -653,7 +653,7 @@ func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserConte
 			strings.Contains(text, "status of 404") {
 			return
 		}
-		log.Printf("Browser console (%s): %s", targetURL, text)
+		obs.From(ctx).Info("browser console", "target_url", targetURL, "text", text)
 	})
 
 	// Network Interception
@@ -744,20 +744,20 @@ func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserConte
 		timeout *= config.TimeoutMultipliers.Medium
 	}
 
-	log.Printf("Navigating to: %s", targetURL)
+	obs.From(ctx).Info("navigating", "target_url", targetURL)
 	_, err := page.Goto(targetURL, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(timeout),
 	})
 	if err != nil {
-		log.Printf("Navigation failed for %s: %v", targetURL, err)
+		obs.From(ctx).Info("navigation failed", "target_url", targetURL, "error", err)
 		return err
 	}
-	log.Printf("Navigation completed for %s", targetURL)
+	obs.From(ctx).Info("navigation completed", "target_url", targetURL)
 
 	// Injection of LocalStorage/SessionStorage
 	if len(config.LocalStorage) > 0 || len(config.SessionStorage) > 0 {
-		log.Printf("Injecting storage for %s", targetURL)
+		obs.From(ctx).Info("injecting storage", "target_url", targetURL)
 		storageScript := `(data) => {
 			for (const [k, v] of Object.entries(data.local || {})) {
 				const val = typeof v === 'string' ? v : JSON.stringify(v);
@@ -773,38 +773,38 @@ func (s *Scraper) preparePage(page playwright.Page, bCtx playwright.BrowserConte
 			"session": config.SessionStorage,
 		})
 		if config.ReloadAfterStorageInjection {
-			log.Printf("Reloading page after storage injection for %s", targetURL)
+			obs.From(ctx).Info("reloading page after storage injection", "target_url", targetURL)
 			page.Reload()
 		}
 	}
 
 	if config.CloudflareBypass {
-		log.Printf("Cloudflare bypass enabled, waiting 5s for %s...", targetURL)
+		obs.From(ctx).Info("cloudflare bypass enabled, waiting 5s", "target_url", targetURL)
 		time.Sleep(5 * time.Second)
 	}
 
 	// Handle age confirmation popup for SPAs if script is provided
 	if config.PreScript != "" {
-		log.Printf("Executing PreScript for %s...", targetURL)
+		obs.From(ctx).Info("executing prescript", "target_url", targetURL)
 		if _, err := page.Evaluate(config.PreScript); err != nil {
-			log.Printf("WARNING: PreScript execution failed for %s: %v", targetURL, err)
+			obs.From(ctx).Info("prescript execution failed", "target_url", targetURL, "error", err)
 		}
 		// Wait for DOM to react (critical for SPAs)
 		time.Sleep(5 * time.Second)
 	} else {
 		// Default wait for SPAs
-		log.Printf("Waiting 3s for SPA/JS initialization for %s...", targetURL)
+		obs.From(ctx).Info("waiting 3s for spa/js initialization", "target_url", targetURL)
 		time.Sleep(3 * time.Second)
 	}
 
 	// Basic scroll to trigger lazy-loading
-	log.Printf("Performing initial triggers/scrolls for %s", targetURL)
+	obs.From(ctx).Info("performing initial triggers/scrolls", "target_url", targetURL)
 	if _, err := page.Evaluate(`window.scrollTo(0, document.body.scrollHeight/2)`); err != nil {
-		log.Printf("WARNING: Scroll (half) failed: %v", err)
+		obs.From(ctx).Info("scroll (half) failed", "target_url", targetURL, "error", err)
 	}
 	time.Sleep(1 * time.Second)
 	if _, err := page.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`); err != nil {
-		log.Printf("WARNING: Scroll (full) failed: %v", err)
+		obs.From(ctx).Info("scroll (full) failed", "target_url", targetURL, "error", err)
 	}
 	time.Sleep(1 * time.Second)
 

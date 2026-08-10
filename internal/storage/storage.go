@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
+	"github.com/gatuno/scraper/internal/obs"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -62,6 +62,6 @@ func (s *S3Client) Upload(ctx context.Context, bucketName, objectName string, da
 		return "", fmt.Errorf("failed to upload object: %w", err)
 	}
 
-	log.Printf("Successfully uploaded to S3: bucket=%s, object=%s", bucketName, objectName)
+	obs.From(ctx).Info("successfully uploaded to s3", "bucket", bucketName, "object", objectName)
 	return fmt.Sprintf("%s/%s", bucketName, objectName), nil
 }

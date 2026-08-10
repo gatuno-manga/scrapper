@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 
+	"github.com/gatuno/scraper/internal/obs"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -51,7 +51,7 @@ func NewBrowserPool(browserURL string, poolSize int) (*BrowserPool, error) {
 		sem:        make(chan struct{}, poolSize),
 	}
 
-	if err := pool.ensureBrowser(); err != nil {
+	if err := pool.ensureBrowser(context.Background()); err != nil {
 		pw.Stop()
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func NewBrowserPool(browserURL string, poolSize int) (*BrowserPool, error) {
 	return pool, nil
 }
 
-func (p *BrowserPool) ensureBrowser() error {
+func (p *BrowserPool) ensureBrowser(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -120,14 +120,14 @@ func (p *BrowserPool) ensureBrowser() error {
 		}
 	}
 
-	log.Printf("Browser connection established (URL: %s)", p.browserURL)
+	obs.From(ctx).Info("browser connection established", "browser_url", p.browserURL)
 	return nil
 }
 
 func (p *BrowserPool) Acquire(ctx context.Context) (playwright.BrowserContext, error) {
 	select {
 	case p.sem <- struct{}{}:
-		if err := p.ensureBrowser(); err != nil {
+		if err := p.ensureBrowser(ctx); err != nil {
 			<-p.sem
 			return nil, err
 		}
@@ -162,7 +162,7 @@ func (p *BrowserPool) NewContextWithOpts(ctx context.Context, opts playwright.Br
 
 	select {
 	case p.sem <- struct{}{}:
-		if err := p.ensureBrowser(); err != nil {
+		if err := p.ensureBrowser(ctx); err != nil {
 			<-p.sem
 			return nil, err
 		}
