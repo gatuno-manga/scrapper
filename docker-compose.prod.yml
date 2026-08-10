@@ -2,7 +2,7 @@ name: gatuno
 
 services:
   browserless:
-    image: browserless/chrome:v2.9.0
+    image: ghcr.io/browserless/chromium:v2.55.3
     container_name: gatuno-browserless
     restart: on-failure:3
     environment:
@@ -10,15 +10,27 @@ services:
       - CONNECTION_TIMEOUT=300000
     networks:
       - gatuno-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/pressure"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.3.17
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.0
     container_name: gatuno-flaresolverr
-    restart: always
+    restart: on-failure:3
     environment:
       - LOG_LEVEL=info
     networks:
       - gatuno-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   scraper:
     build:
@@ -31,8 +43,10 @@ services:
       - BROWSER_URL=ws://browserless:3000
       - FLARESOLVERR_URL=http://flaresolverr:8191
     depends_on:
-      - browserless
-      - flaresolverr
+      browserless:
+        condition: service_healthy
+      flaresolverr:
+        condition: service_healthy
     networks:
       - gatuno-net
 

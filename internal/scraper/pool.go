@@ -2,8 +2,10 @@ package scraper
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -72,23 +74,27 @@ func (p *BrowserPool) ensureBrowser() error {
 
 	var err error
 	if p.browserURL != "" {
-		// Append stealth and security bypass flags to Browserless URL
+		// Browserless v2 launches the browser per-connection using a single
+		// "launch" query param (JSON-encoded), replacing the v1 scheme of one
+		// query param per Chrome flag.
+		var launchArgs []byte
+		launchArgs, err = json.Marshal(map[string][]string{
+			"args": {
+				"--disable-web-security",
+				"--disable-features=IsolateOrigins,site-per-process",
+				"--disable-blink-features=AutomationControlled",
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("could not encode browserless launch args: %v", err)
+		}
+
 		finalURL := p.browserURL
 		connector := "?"
 		if strings.Contains(finalURL, "?") {
 			connector = "&"
 		}
-		
-		flags := []string{
-			"--disable-web-security",
-			"--disable-features=IsolateOrigins,site-per-process",
-			"--disable-blink-features=AutomationControlled",
-		}
-		
-		for _, flag := range flags {
-			finalURL += fmt.Sprintf("%s%s=true", connector, flag)
-			connector = "&"
-		}
+		finalURL += fmt.Sprintf("%slaunch=%s", connector, url.QueryEscape(string(launchArgs)))
 
 		p.browser, err = p.pw.Chromium.ConnectOverCDP(finalURL)
 		if err != nil {

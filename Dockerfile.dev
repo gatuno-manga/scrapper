@@ -13,7 +13,7 @@ WORKDIR /app
 # Install Air for hot-reload
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go install github.com/air-verse/air@v1.52.3
+    go install github.com/air-verse/air@v1.67.4
 
 # Copy dependency files
 ENV GOPROXY="https://proxy.golang.org,direct"
@@ -25,6 +25,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go run github.com/mxschmitt/playwright-go/cmd/playwright install --with-deps
+
+# Copy source code so the image is self-sufficient at build time.
+# Compose Watch's sync action only pushes changes made after the container
+# starts — it does not perform an initial copy — so without this, air has
+# nothing to serve (.air.toml missing) until the first file edit.
+COPY . .
 
 # Expose port for health checks or metrics if any
 EXPOSE 8080

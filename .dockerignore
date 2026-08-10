@@ -2,7 +2,6 @@
 .github
 .gitignore
 .env
-.air.toml
 .commitlintrc.json
 lefthook.yml
 debug_request.json

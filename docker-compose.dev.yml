@@ -21,13 +21,15 @@ services:
     ports:
       - "6060:6060"
     depends_on:
-      - flaresolverr
-      - browserless
+      flaresolverr:
+        condition: service_healthy
+      browserless:
+        condition: service_healthy
     networks:
       - gatuno-net
 
   browserless:
-    image: browserless/chrome:v2.9.0
+    image: ghcr.io/browserless/chromium:v2.55.3
     ports:
       - "3002:3000"
     environment:
@@ -37,14 +39,26 @@ services:
       - ENABLE_CORS=true
     networks:
       - gatuno-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/pressure"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.3.17
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.0
     container_name: scraping-flaresolverr
     environment:
       - LOG_LEVEL=info
     networks:
       - gatuno-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 networks:
   gatuno-net:
