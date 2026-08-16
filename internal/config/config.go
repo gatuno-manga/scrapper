@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -61,7 +62,7 @@ type Config struct {
 	}
 
 
-func LoadConfig() Config {
+func LoadConfig() (Config, error) {
 	_ = godotenv.Load()
 
 	brokers := os.Getenv("KAFKA_BROKERS")
@@ -69,36 +70,36 @@ func LoadConfig() Config {
 		brokers = "localhost:9092"
 	}
 
-	poolSize := 2
-	if ps := os.Getenv("BROWSER_POOL_SIZE"); ps != "" {
-		fmt.Sscanf(ps, "%d", &poolSize)
+	poolSize, err := getEnvInt("BROWSER_POOL_SIZE", 2)
+	if err != nil {
+		return Config{}, err
 	}
 
-	var cacheSize int64 = 100
-	if cs := os.Getenv("CACHE_MAX_SIZE_MB"); cs != "" {
-		fmt.Sscanf(cs, "%d", &cacheSize)
+	cacheSize, err := getEnvInt64("CACHE_MAX_SIZE_MB", 100)
+	if err != nil {
+		return Config{}, err
 	}
 
-	writeTimeout := 10
-	if wt := os.Getenv("KAFKA_WRITE_TIMEOUT"); wt != "" {
-		fmt.Sscanf(wt, "%d", &writeTimeout)
+	writeTimeout, err := getEnvInt("KAFKA_WRITE_TIMEOUT", 10)
+	if err != nil {
+		return Config{}, err
 	}
 
-	readTimeout := 10
-	if rt := os.Getenv("KAFKA_READ_TIMEOUT"); rt != "" {
-		fmt.Sscanf(rt, "%d", &readTimeout)
+	readTimeout, err := getEnvInt("KAFKA_READ_TIMEOUT", 10)
+	if err != nil {
+		return Config{}, err
 	}
 
-	acks := 1 // default to acks=1 (leader only)
-	if a := os.Getenv("KAFKA_REQUIRED_ACKS"); a != "" {
-		fmt.Sscanf(a, "%d", &acks)
+	acks, err := getEnvInt("KAFKA_REQUIRED_ACKS", 1) // default to acks=1 (leader only)
+	if err != nil {
+		return Config{}, err
 	}
 
 	endpoint := getEnv("STORAGE_ENDPOINT", "localhost:9000")
 	endpoint = strings.TrimPrefix(endpoint, "http://")
 	endpoint = strings.TrimPrefix(endpoint, "https://")
 
-	return Config{
+	cfg := Config{
 		KafkaBrokers:    strings.Split(brokers, ","),
 		KafkaGroupID:    getEnv("KAFKA_GROUP_ID", "scraper-microservice"),
 		S3Endpoint:      endpoint,
@@ -148,6 +149,37 @@ func LoadConfig() Config {
 		TopicBookFailed:      getEnv("TOPIC_BOOK_FAILED", "scraping.book.failed"),
 		ProcessedImagesBucket: getEnv("PROCESSED_IMAGES_BUCKET", "books"),
 	}
+
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
+	}
+
+	return cfg, nil
+}
+
+// validate rejects configuration values that would otherwise fail silently
+// or hang the service (e.g. BROWSER_POOL_SIZE=0 makes the browser-pool
+// semaphore permanently unacquirable).
+func (c Config) validate() error {
+	if c.BrowserPoolSize < 1 {
+		return fmt.Errorf("BROWSER_POOL_SIZE must be >= 1, got %d", c.BrowserPoolSize)
+	}
+	if c.CacheMaxSizeMB < 1 {
+		return fmt.Errorf("CACHE_MAX_SIZE_MB must be >= 1, got %d", c.CacheMaxSizeMB)
+	}
+	if c.KafkaWriteTimeout < 1 {
+		return fmt.Errorf("KAFKA_WRITE_TIMEOUT must be >= 1, got %d", c.KafkaWriteTimeout)
+	}
+	if c.KafkaReadTimeout < 1 {
+		return fmt.Errorf("KAFKA_READ_TIMEOUT must be >= 1, got %d", c.KafkaReadTimeout)
+	}
+	if c.KafkaRequiredAcks != -1 && c.KafkaRequiredAcks != 0 && c.KafkaRequiredAcks != 1 {
+		return fmt.Errorf("KAFKA_REQUIRED_ACKS must be -1, 0, or 1, got %d", c.KafkaRequiredAcks)
+	}
+	if len(c.KafkaBrokers) == 0 || c.KafkaBrokers[0] == "" {
+		return fmt.Errorf("KAFKA_BROKERS must not be empty")
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {
@@ -155,4 +187,28 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func getEnvInt(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s=%q: %w", key, v, err)
+	}
+	return n, nil
+}
+
+func getEnvInt64(key string, fallback int64) (int64, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s=%q: %w", key, v, err)
+	}
+	return n, nil
 }

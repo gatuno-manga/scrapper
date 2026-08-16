@@ -12,7 +12,10 @@ import (
 )
 
 func main() {
-	cfg := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 	producer := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaWriteTimeout, cfg.KafkaRequiredAcks, cfg.KafkaAllowAutoTopicCreation)
 	defer producer.Close()
 

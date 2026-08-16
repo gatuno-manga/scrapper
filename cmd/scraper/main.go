@@ -25,7 +25,11 @@ import (
 )
 
 func main() {
-	cfg := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
 	obs.Setup(obs.ParseLevel(cfg.LogLevel), cfg.LogFormat)
 
 	// Storage

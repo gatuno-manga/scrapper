@@ -19,7 +19,10 @@ func TestLoadConfig(t *testing.T) {
 		os.Unsetenv("STORAGE_SSL")
 	}()
 
-	cfg := LoadConfig()
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
 
 	if len(cfg.KafkaBrokers) != 2 || cfg.KafkaBrokers[0] != "kafka1:9092" {
 		t.Errorf("Expected 2 Kafka brokers, got %v", cfg.KafkaBrokers)
@@ -44,7 +47,10 @@ func TestLoadConfigDefaults(t *testing.T) {
 	os.Unsetenv("STORAGE_ENDPOINT")
 	os.Unsetenv("BROWSER_POOL_SIZE")
 
-	cfg := LoadConfig()
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
 
 	if cfg.KafkaBrokers[0] != "localhost:9092" {
 		t.Errorf("Expected default Kafka broker localhost:9092, got %s", cfg.KafkaBrokers[0])
@@ -78,12 +84,55 @@ func TestLoadConfig_LogLevelAndFormat(t *testing.T) {
 		os.Unsetenv("LOG_FORMAT")
 	}()
 
-	cfg := LoadConfig()
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
 
 	if cfg.LogLevel != "debug" {
 		t.Errorf("Expected log level debug, got %s", cfg.LogLevel)
 	}
 	if cfg.LogFormat != "text" {
 		t.Errorf("Expected log format text, got %s", cfg.LogFormat)
+	}
+}
+
+// TestLoadConfig_InvalidValues guards QUAL-02: a malformed or out-of-range
+// env var must fail LoadConfig loudly instead of silently falling back to a
+// default (e.g. BROWSER_POOL_SIZE=0 would otherwise make the browser-pool
+// semaphore permanently unacquirable while the service reports healthy).
+func TestLoadConfig_InvalidValues(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"non-numeric pool size", map[string]string{"BROWSER_POOL_SIZE": "abc"}},
+		{"zero pool size", map[string]string{"BROWSER_POOL_SIZE": "0"}},
+		{"negative pool size", map[string]string{"BROWSER_POOL_SIZE": "-1"}},
+		{"non-numeric cache size", map[string]string{"CACHE_MAX_SIZE_MB": "abc"}},
+		{"zero cache size", map[string]string{"CACHE_MAX_SIZE_MB": "0"}},
+		{"non-numeric write timeout", map[string]string{"KAFKA_WRITE_TIMEOUT": "abc"}},
+		{"zero write timeout", map[string]string{"KAFKA_WRITE_TIMEOUT": "0"}},
+		{"non-numeric read timeout", map[string]string{"KAFKA_READ_TIMEOUT": "abc"}},
+		{"zero read timeout", map[string]string{"KAFKA_READ_TIMEOUT": "0"}},
+		{"non-numeric required acks", map[string]string{"KAFKA_REQUIRED_ACKS": "abc"}},
+		{"out-of-range required acks", map[string]string{"KAFKA_REQUIRED_ACKS": "2"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				os.Setenv(k, v)
+			}
+			defer func() {
+				for k := range tc.env {
+					os.Unsetenv(k)
+				}
+			}()
+
+			if _, err := LoadConfig(); err == nil {
+				t.Errorf("expected LoadConfig to return an error for %v, got nil", tc.env)
+			}
+		})
 	}
 }
