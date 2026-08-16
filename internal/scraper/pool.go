@@ -108,7 +108,7 @@ func (p *BrowserPool) ensureBrowser(ctx context.Context) error {
 			return fmt.Errorf("could not connect to browserless: %v", err)
 		}
 	} else {
-		err = playwright.Install()
+		err = playwright.Install(playwrightRunOptions())
 		if err != nil {
 			return fmt.Errorf("could not install playwright: %v", err)
 		}
