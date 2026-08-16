@@ -15,6 +15,7 @@ import (
 
 	"github.com/gatuno/scraper/internal/config"
 	"github.com/gatuno/scraper/internal/kafka"
+	"github.com/gatuno/scraper/internal/metrics"
 	"github.com/gatuno/scraper/internal/models"
 	"github.com/gatuno/scraper/internal/obs"
 	"github.com/gatuno/scraper/internal/scraper"
@@ -112,6 +113,7 @@ func main() {
 // if delivery fails. Call sites must NOT silently discard the error.
 func publishOrLog(ctx context.Context, producer *kafka.Producer, topic string, msg interface{}) {
 	if err := producer.Publish(ctx, topic, msg); err != nil {
+		metrics.KafkaPublishFailuresTotal.WithLabelValues(topic).Inc()
 		obs.From(ctx).Error("failed to publish", "topic", topic, "error", err)
 	}
 }
@@ -121,6 +123,7 @@ func publishOrLog(ctx context.Context, producer *kafka.Producer, topic string, m
 // the same partition and downstream consumers observe them in order.
 func publishKeyedOrLog(ctx context.Context, producer *kafka.Producer, topic, key string, msg interface{}) {
 	if err := producer.PublishKeyed(ctx, topic, key, msg); err != nil {
+		metrics.KafkaPublishFailuresTotal.WithLabelValues(topic).Inc()
 		obs.From(ctx).Error("failed to publish", "topic", topic, "error", err)
 	}
 }
@@ -166,12 +169,15 @@ func redactPayload(payload []byte) string {
 // sendToDLQ routes an unprocessable message to the dead-letter queue topic so
 // it can be inspected and replayed later without blocking the main consumer.
 func sendToDLQ(ctx context.Context, producer *kafka.Producer, dlqTopic, originalTopic string, payload []byte, reason error) {
+	metrics.DLQTotal.WithLabelValues(originalTopic).Inc()
+	metrics.JobsTotal.WithLabelValues(originalTopic, "dlq").Inc()
 	dlqMsg := models.DeadLetterMessage{
 		OriginalTopic: originalTopic,
 		Payload:       redactPayload(payload),
 		Error:         reason.Error(),
 	}
 	if err := producer.Publish(ctx, dlqTopic, dlqMsg); err != nil {
+		metrics.KafkaPublishFailuresTotal.WithLabelValues(dlqTopic).Inc()
 		obs.From(ctx).Error("failed to send message to dlq", "dlq_topic", dlqTopic, "error", err, "original_error", reason)
 	}
 }
@@ -245,6 +251,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(jobCtx, req, wc)
 			if err != nil {
+				metrics.JobsTotal.WithLabelValues(cfg.TopicChapterRequested, "failed").Inc()
 				obs.From(jobCtx).Error("scrape failed", "error", err)
 				publishKeyedOrLog(jobCtx, producer, cfg.TopicChapterFailed, req.ChapterID, models.ScrapingChapterFailed{
 					JobID:     req.JobID,
@@ -280,6 +287,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			for r := range results {
 				if r.Error != nil {
+					metrics.ImagesTotal.WithLabelValues("download_failed").Inc()
 					obs.From(jobCtx).Debug("image download failed", "image_index", r.Index, "error", r.Error)
 					continue
 				}
@@ -296,10 +304,13 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 				obs.From(jobCtx).Debug("attempting upload", "image_index", r.Index, "bucket", req.UploadTarget.Bucket, "object", rawName, "bytes", len(r.Data))
 				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
+					metrics.ImagesTotal.WithLabelValues("upload_failed").Inc()
 					obs.From(jobCtx).Error("upload failed", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
+				metrics.ImagesTotal.WithLabelValues("ok").Inc()
+				metrics.ImageBytesTotal.Add(float64(len(r.Data)))
 
 				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
 
@@ -342,6 +353,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				Images:       scImages,
 			})
 
+			metrics.JobsTotal.WithLabelValues(cfg.TopicChapterRequested, "ok").Inc()
 			obs.From(jobCtx).Info("chapter completed")
 		}(req, msg)
 	}
@@ -387,6 +399,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		result, err := engine.ScrapeUpdateBook(jobCtx, req, wc)
 		if err != nil {
+			metrics.JobsTotal.WithLabelValues(cfg.TopicUpdateBookRequested, "failed").Inc()
 			obs.From(jobCtx).Error("update book scrape failed", "error", err)
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicBookFailed, req.BookID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
@@ -399,6 +412,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 		}
 
 		publishKeyedOrLog(jobCtx, producer, cfg.TopicUpdateBookCompleted, req.BookID, result)
+		metrics.JobsTotal.WithLabelValues(cfg.TopicUpdateBookRequested, "ok").Inc()
 		obs.From(jobCtx).Info("update book completed")
 		commitOrLog(jobCtx, consumer, msg)
 	}
@@ -443,6 +457,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		result, err := engine.ScrapeNewBook(jobCtx, req, wc)
 		if err != nil {
+			metrics.JobsTotal.WithLabelValues(cfg.TopicNewBookRequested, "failed").Inc()
 			obs.From(jobCtx).Error("new book scrape failed", "error", err)
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicBookFailed, req.JobID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
@@ -455,6 +470,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		// No BookID exists yet for a new book, so key on JobID instead.
 		publishKeyedOrLog(jobCtx, producer, cfg.TopicBookCompleted, req.JobID, result)
+		metrics.JobsTotal.WithLabelValues(cfg.TopicNewBookRequested, "ok").Inc()
 		obs.From(jobCtx).Info("new book completed")
 		commitOrLog(jobCtx, consumer, msg)
 	}
@@ -507,6 +523,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			coverResults := make([]models.ScrapingCoverResult, 0, len(req.Covers))
 			for r := range results {
 				if r.Error != nil {
+					metrics.ImagesTotal.WithLabelValues("download_failed").Inc()
 					obs.From(jobCtx).Debug("cover download failed", "image_index", r.Index, "error", r.Error)
 					continue
 				}
@@ -526,10 +543,13 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
+					metrics.ImagesTotal.WithLabelValues("upload_failed").Inc()
 					obs.From(jobCtx).Error("cover upload failed", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
+				metrics.ImagesTotal.WithLabelValues("ok").Inc()
+				metrics.ImageBytesTotal.Add(float64(len(r.Data)))
 
 				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
 
@@ -558,6 +578,7 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 				Results:      coverResults,
 			})
 
+			metrics.JobsTotal.WithLabelValues(cfg.TopicCoversRequested, "ok").Inc()
 			obs.From(jobCtx).Info("covers request completed", "processed", len(coverResults), "total", len(req.Covers))
 		}(req, msg)
 	}
@@ -611,6 +632,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			count := 0
 			for r := range results {
 				if r.Error != nil {
+					metrics.ImagesTotal.WithLabelValues("download_failed").Inc()
 					obs.From(jobCtx).Debug("image download failed", "image_index", r.Index, "error", r.Error)
 					continue
 				}
@@ -624,10 +646,13 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
+					metrics.ImagesTotal.WithLabelValues("upload_failed").Inc()
 					obs.From(jobCtx).Error("image upload failed", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
 				}
+				metrics.ImagesTotal.WithLabelValues("ok").Inc()
+				metrics.ImageBytesTotal.Add(float64(len(r.Data)))
 
 				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
 
@@ -654,6 +679,7 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 				URLMap:       urlMap,
 			})
 
+			metrics.JobsTotal.WithLabelValues(cfg.TopicImagesRequested, "ok").Inc()
 			obs.From(jobCtx).Info("images request completed", "processed", count, "total", len(req.ImageURLs))
 		}(req, msg)
 	}

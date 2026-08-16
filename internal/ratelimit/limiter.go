@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gatuno/scraper/internal/metrics"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -62,6 +63,7 @@ end
 func (l *RedisRateLimiter) Wait(ctx context.Context, domain string) error {
 	rate := 3.0
 	capacity := 5.0
+	start := time.Now()
 
 	key := fmt.Sprintf("rate_limit:domain:%s", domain)
 	for {
@@ -75,6 +77,7 @@ func (l *RedisRateLimiter) Wait(ctx context.Context, domain string) error {
 		}
 
 		if allowed, ok := res.(int64); ok && allowed == 1 {
+			metrics.RateLimitWaitSeconds.WithLabelValues(metrics.BoundedDomain(domain)).Observe(time.Since(start).Seconds())
 			return nil
 		}
 		

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gatuno/scraper/internal/metrics"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
@@ -58,6 +59,7 @@ return 1
 func (s *RedisSemaphore) Acquire(ctx context.Context, domain string) (func(), error) {
 	key := fmt.Sprintf("semaphore:browser:%s", domain)
 	id := uuid.New().String()
+	start := time.Now()
 
 	for {
 		if ctx.Err() != nil {
@@ -73,6 +75,7 @@ func (s *RedisSemaphore) Acquire(ctx context.Context, domain string) (func(), er
 		}
 
 		if allowed, ok := res.(int64); ok && allowed == 1 {
+			metrics.SemaphoreWaitSeconds.WithLabelValues(metrics.BoundedDomain(domain)).Observe(time.Since(start).Seconds())
 			// Acquired successfully
 			return func() {
 				// Use Background context to guarantee release even if parent context timed out

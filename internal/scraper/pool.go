@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gatuno/scraper/internal/metrics"
 	"github.com/gatuno/scraper/internal/obs"
 	"github.com/mxschmitt/playwright-go"
 )
@@ -130,6 +131,7 @@ func (p *BrowserPool) ensureBrowser(ctx context.Context) error {
 	p.connectedAt = time.Now()
 
 	if isReconnect {
+		metrics.BrowserReconnectsTotal.Inc()
 		obs.From(ctx).Warn("browser reconnected", "browser_url", p.browserURL, "previous_connection_age", previousAge.String())
 	} else {
 		obs.From(ctx).Info("browser connection established", "browser_url", p.browserURL)
@@ -149,8 +151,10 @@ func (p *BrowserPool) IsConnected() bool {
 func (p *BrowserPool) Acquire(ctx context.Context) (playwright.BrowserContext, error) {
 	select {
 	case p.sem <- struct{}{}:
+		metrics.BrowserPoolInUse.Inc()
 		if err := p.ensureBrowser(ctx); err != nil {
 			<-p.sem
+			metrics.BrowserPoolInUse.Dec()
 			return nil, err
 		}
 
@@ -165,6 +169,7 @@ func (p *BrowserPool) Acquire(ctx context.Context) (playwright.BrowserContext, e
 		})
 		if err != nil {
 			<-p.sem
+			metrics.BrowserPoolInUse.Dec()
 			return nil, err
 		}
 		return bCtx, nil
@@ -184,14 +189,17 @@ func (p *BrowserPool) NewContextWithOpts(ctx context.Context, opts playwright.Br
 
 	select {
 	case p.sem <- struct{}{}:
+		metrics.BrowserPoolInUse.Inc()
 		if err := p.ensureBrowser(ctx); err != nil {
 			<-p.sem
+			metrics.BrowserPoolInUse.Dec()
 			return nil, err
 		}
 
 		bCtx, err := p.browser.NewContext(opts)
 		if err != nil {
 			<-p.sem
+			metrics.BrowserPoolInUse.Dec()
 			return nil, err
 		}
 		return bCtx, nil
@@ -207,6 +215,7 @@ func (p *BrowserPool) Release(bCtx playwright.BrowserContext) {
 	// Drain one slot from semaphore
 	select {
 	case <-p.sem:
+		metrics.BrowserPoolInUse.Dec()
 	default:
 		// Should not happen if Acquire/Release are balanced
 	}
