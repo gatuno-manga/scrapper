@@ -500,11 +500,16 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			results, cleanup := engine.ScrapeCovers(jobCtx, req, wc)
 			defer cleanup()
 
-			s3Paths := make([]string, 0, len(req.Covers))
+			coverResults := make([]models.ScrapingCoverResult, 0, len(req.Covers))
 			for r := range results {
 				if r.Error != nil {
 					obs.From(jobCtx).Debug("cover download failed", "image_index", r.Index, "error", r.Error)
 					continue
+				}
+
+				var originalURL string
+				if r.Index >= 0 && r.Index < len(req.Covers) {
+					originalURL = req.Covers[r.Index].URL
 				}
 
 				// Path pattern: <prefix>/<shard>/<uuid>.jpg
@@ -524,13 +529,18 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 				rawPathWithBucket := fmt.Sprintf("%s/%s", req.UploadTarget.Bucket, rawName)
 
-				s3Paths = append(s3Paths, rawPathWithBucket)
+				coverResults = append(coverResults, models.ScrapingCoverResult{
+					OriginalURL: originalURL,
+					Path:        rawPathWithBucket,
+				})
 
 				publishOrLog(jobCtx, producer, cfg.TopicImageProcessing, models.ImageProcessingRequested{
 					RawPath:      rawPathWithBucket,
+					OriginalURL:  originalURL,
 					TargetBucket: cfg.ProcessedImagesBucket,
 					TargetPath:   targetName,
 					IsBackfill:   false,
+					Widths:       req.Widths,
 				})
 
 				// Early memory release for GC
@@ -541,10 +551,10 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicCoversCompleted, req.JobID, models.ScrapingCoversCompleted{
 				JobID:        req.JobID,
 				BookID:       req.BookID,
-				Results:      s3Paths,
+				Results:      coverResults,
 			})
 
-			obs.From(jobCtx).Info("covers request completed", "processed", len(s3Paths), "total", len(req.Covers))
+			obs.From(jobCtx).Info("covers request completed", "processed", len(coverResults), "total", len(req.Covers))
 		}(req, msg)
 	}
 }

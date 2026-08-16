@@ -100,9 +100,11 @@ type ScrapingChapterFailed struct {
 
 type ImageProcessingRequested struct {
 	RawPath      string `json:"rawPath"`
+	OriginalURL  string `json:"originalUrl,omitempty"`
 	TargetBucket string `json:"targetBucket"`
 	TargetPath   string `json:"targetPath"`
 	IsBackfill   bool   `json:"isBackfill"`
+	Widths       []int  `json:"widths,omitempty"`
 }
 
 type ScrapingTestRequest struct {
@@ -208,12 +210,18 @@ type ScrapingCoversRequest struct {
 	WebsiteConfig *WebsiteConfig `json:"websiteConfig,omitempty"`
 	UploadTarget UploadTarget   `json:"uploadTarget"`
 	Covers       []CoverInfo    `json:"images"` // Mapped from images
+	Widths       []int          `json:"widths,omitempty"`
+}
+
+type ScrapingCoverResult struct {
+	OriginalURL string `json:"originalUrl"`
+	Path        string `json:"path"`
 }
 
 type ScrapingCoversCompleted struct {
-	JobID   string   `json:"jobId"`
-	BookID  string   `json:"bookId"`
-	Results []string `json:"results"` // S3 Paths (raw)
+	JobID   string                `json:"jobId"`
+	BookID  string                `json:"bookId"`
+	Results []ScrapingCoverResult `json:"results"`
 }
 
 type ScrapingImagesRequest struct {
