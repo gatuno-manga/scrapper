@@ -76,9 +76,13 @@ async (options) => {
 }
 `
 
-func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterRequest, config models.WebsiteConfig) (string, []string, <-chan ImageResult, func(), error) {
+func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterRequest, config models.WebsiteConfig, timings *PhaseTimings) (string, []string, <-chan ImageResult, func(), error) {
 	domain := extractDomain(req.TargetURL)
+	semWaitStart := time.Now()
 	releaseSem, err := s.semaphore.Acquire(ctx, domain)
+	if timings != nil {
+		timings.SemWaitMs = time.Since(semWaitStart).Milliseconds()
+	}
 	if err != nil {
 		return "", nil, nil, func() {}, err
 	}
@@ -125,7 +129,15 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(ctx, page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
+	prepareStart := time.Now()
+	err = s.preparePage(ctx, page, bCtx, config, req.TargetURL, interceptedImages, timings)
+	if timings != nil {
+		// PrepareMs excludes NavMs (recorded inside preparePage) so the two
+		// phases sum to the actual wall time spent in preparePage, matching
+		// the nav|prepare split in the wide completion event.
+		timings.PrepareMs = time.Since(prepareStart).Milliseconds() - timings.NavMs
+	}
+	if err != nil {
 		cleanup()
 		return "", nil, nil, func() {}, err
 	}
@@ -152,11 +164,15 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		return "", nil, nil, func() {}, fmt.Errorf("images selector is empty (not found in website config or chapter request)")
 	}
 
+	scrollStart := time.Now()
 	_, err = page.Evaluate(aggressiveScrollJS, map[string]interface{}{
 		"scrollPauseMs":   1500,
 		"stabilityChecks": 3,
 		"imageSelector":   imagesSelector,
 	})
+	if timings != nil {
+		timings.ScrollMs = time.Since(scrollStart).Milliseconds()
+	}
 	if err != nil {
 		obs.From(ctx).Warn("scroll failed", "error", err)
 	}
@@ -174,6 +190,7 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 	}
 	obs.From(ctx).Info("found images via selectors", "count", count)
 
+	extractStart := time.Now()
 	imageUrls := make([]string, 0, count)
 	for i := 0; i < count; i++ {
 		img := imageLocators.Nth(i)
@@ -208,6 +225,10 @@ func (s *Scraper) ScrapeChapter(ctx context.Context, req models.ScrapingChapterR
 		if src != "" {
 			imageUrls = append(imageUrls, src)
 		}
+	}
+
+	if timings != nil {
+		timings.ExtractMs = time.Since(extractStart).Milliseconds()
 	}
 
 	results := s.ScrapeBatchImages(ctx, page, config, imageUrls, interceptedImages)
@@ -414,7 +435,7 @@ func (s *Scraper) scrapeBookPage(ctx context.Context, in bookScrapeInput) (model
 	}
 	defer page.Close()
 
-	if err := s.preparePage(ctx, page, bCtx, in.WebsiteConfig, in.TargetURL, nil); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, in.WebsiteConfig, in.TargetURL, nil, nil); err != nil {
 		return models.ScrapingBookCompleted{}, err
 	}
 
@@ -542,7 +563,7 @@ func (s *Scraper) ScrapeCovers(ctx context.Context, req models.ScrapingCoversReq
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(ctx, page, bCtx, config, req.TargetURL, interceptedImages); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, config, req.TargetURL, interceptedImages, nil); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
 		releaseSem()
@@ -598,7 +619,7 @@ func (s *Scraper) ScrapeImages(ctx context.Context, req models.ScrapingImagesReq
 	}
 
 	interceptedImages := &sync.Map{}
-	if err := s.preparePage(ctx, page, bCtx, config, targetURL, interceptedImages); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, config, targetURL, interceptedImages, nil); err != nil {
 		page.Close()
 		s.pool.Release(bCtx)
 		releaseSem()
@@ -635,14 +656,14 @@ func (s *Scraper) ExecuteTestScript(ctx context.Context, req models.ScrapingTest
 	}
 	defer page.Close()
 
-	if err := s.preparePage(ctx, page, bCtx, models.WebsiteConfig{}, req.TargetURL, nil); err != nil {
+	if err := s.preparePage(ctx, page, bCtx, models.WebsiteConfig{}, req.TargetURL, nil, nil); err != nil {
 		return nil, err
 	}
 
 	return page.Evaluate(req.Script)
 }
 
-func (s *Scraper) preparePage(ctx context.Context, page playwright.Page, bCtx playwright.BrowserContext, config models.WebsiteConfig, targetURL string, interceptedImages *sync.Map) error {
+func (s *Scraper) preparePage(ctx context.Context, page playwright.Page, bCtx playwright.BrowserContext, config models.WebsiteConfig, targetURL string, interceptedImages *sync.Map, timings *PhaseTimings) error {
 	// Add console listener with noise filtering
 	page.On("console", func(msg playwright.ConsoleMessage) {
 		text := msg.Text()
@@ -745,10 +766,14 @@ func (s *Scraper) preparePage(ctx context.Context, page playwright.Page, bCtx pl
 	}
 
 	obs.From(ctx).Info("navigating", "target_url", targetURL)
+	navStart := time.Now()
 	_, err := page.Goto(targetURL, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(timeout),
 	})
+	if timings != nil {
+		timings.NavMs = time.Since(navStart).Milliseconds()
+	}
 	if err != nil {
 		obs.From(ctx).Error("navigation failed", "target_url", targetURL, "error", err)
 		return err

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gatuno/scraper/internal/config"
 	"github.com/gatuno/scraper/internal/kafka"
@@ -242,6 +243,8 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 			obs.From(jobCtx).Info("processing chapter request")
 
+			jobStart := time.Now()
+
 			wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 			if err != nil {
 				obs.From(jobCtx).Error("failed to fetch website config", "error", err)
@@ -249,10 +252,13 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				return
 			}
 
-			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(jobCtx, req, wc)
+			timings := &scraper.PhaseTimings{}
+			title, imageUrls, results, cleanup, err := engine.ScrapeChapter(jobCtx, req, wc, timings)
 			if err != nil {
 				metrics.JobsTotal.WithLabelValues(cfg.TopicChapterRequested, "failed").Inc()
-				obs.From(jobCtx).Error("scrape failed", "error", err)
+				metrics.JobDurationSeconds.WithLabelValues(cfg.TopicChapterRequested).Observe(time.Since(jobStart).Seconds())
+				obs.From(jobCtx).Error("scrape failed", "error", err,
+					"sem_wait_ms", timings.SemWaitMs, "nav_ms", timings.NavMs, "prepare_ms", timings.PrepareMs)
 				publishKeyedOrLog(jobCtx, producer, cfg.TopicChapterFailed, req.ChapterID, models.ScrapingChapterFailed{
 					JobID:     req.JobID,
 					ChapterID: req.ChapterID,
@@ -285,8 +291,13 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 			}
 			processedImages := make([]processedImage, 0, len(imageUrls))
 
+			downloadUploadStart := time.Now()
+			var uploadMs int64
+			var imagesFailed int
+
 			for r := range results {
 				if r.Error != nil {
+					imagesFailed++
 					metrics.ImagesTotal.WithLabelValues("download_failed").Inc()
 					obs.From(jobCtx).Debug("image download failed", "image_index", r.Index, "error", r.Error)
 					continue
@@ -295,6 +306,7 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				// Generate unique ID for the image (UUIDv7 for better time-sorting/locality)
 				imgID, err := newImageID()
 				if err != nil {
+					imagesFailed++
 					obs.From(jobCtx).Warn("failed to generate image id", "image_index", r.Index, "error", err)
 					r.Data = nil
 					continue
@@ -303,9 +315,13 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				rawName, targetName := generateS3Keys(req.UploadTarget.PathPrefix, imgID)
 
 				obs.From(jobCtx).Debug("attempting upload", "image_index", r.Index, "bucket", req.UploadTarget.Bucket, "object", rawName, "bytes", len(r.Data))
-				if _, err := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg"); err != nil {
+				uploadStart := time.Now()
+				_, uploadErr := s3.Upload(jobCtx, req.UploadTarget.Bucket, rawName, r.Data, "image/jpeg")
+				uploadMs += time.Since(uploadStart).Milliseconds()
+				if uploadErr != nil {
+					imagesFailed++
 					metrics.ImagesTotal.WithLabelValues("upload_failed").Inc()
-					obs.From(jobCtx).Error("upload failed", "image_index", r.Index, "error", err)
+					obs.From(jobCtx).Error("upload failed", "image_index", r.Index, "error", uploadErr)
 					r.Data = nil
 					continue
 				}
@@ -353,8 +369,44 @@ func handleChapterRequests(ctx context.Context, consumer *kafka.Consumer, produc
 				Images:       scImages,
 			})
 
+			// downloadUploadMs covers both the concurrent download workers and the
+			// serial upload loop, which overlap (uploads start as soon as the first
+			// result arrives). uploadMs is measured directly around each s3.Upload
+			// call; downloadMs is the remainder — an approximation, not a clean
+			// wall-clock split, since the two phases are pipelined rather than
+			// sequential.
+			downloadUploadMs := time.Since(downloadUploadStart).Milliseconds()
+			downloadMs := downloadUploadMs - uploadMs
+			degraded := imagesFailed > 0
+
+			for phase, ms := range map[string]int64{
+				"sem_wait": timings.SemWaitMs,
+				"nav":      timings.NavMs,
+				"prepare":  timings.PrepareMs,
+				"scroll":   timings.ScrollMs,
+				"extract":  timings.ExtractMs,
+				"download": downloadMs,
+				"upload":   uploadMs,
+			} {
+				metrics.PhaseDurationSeconds.WithLabelValues(phase).Observe(float64(ms) / 1000)
+			}
 			metrics.JobsTotal.WithLabelValues(cfg.TopicChapterRequested, "ok").Inc()
-			obs.From(jobCtx).Info("chapter completed")
+			metrics.JobDurationSeconds.WithLabelValues(cfg.TopicChapterRequested).Observe(time.Since(jobStart).Seconds())
+
+			obs.From(jobCtx).Info("chapter.completed",
+				"duration_ms", time.Since(jobStart).Milliseconds(),
+				"sem_wait_ms", timings.SemWaitMs,
+				"nav_ms", timings.NavMs,
+				"prepare_ms", timings.PrepareMs,
+				"scroll_ms", timings.ScrollMs,
+				"extract_ms", timings.ExtractMs,
+				"download_ms", downloadMs,
+				"upload_ms", uploadMs,
+				"images_found", len(imageUrls),
+				"images_ok", len(scImages),
+				"images_failed", imagesFailed,
+				"degraded", degraded,
+			)
 		}(req, msg)
 	}
 }
@@ -389,6 +441,8 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		obs.From(jobCtx).Info("processing update-book request")
 
+		jobStart := time.Now()
+
 		wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
 			obs.From(jobCtx).Error("failed to fetch website config", "error", err, "payload", payloadFingerprint(msg.Value))
@@ -400,6 +454,7 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 		result, err := engine.ScrapeUpdateBook(jobCtx, req, wc)
 		if err != nil {
 			metrics.JobsTotal.WithLabelValues(cfg.TopicUpdateBookRequested, "failed").Inc()
+			metrics.JobDurationSeconds.WithLabelValues(cfg.TopicUpdateBookRequested).Observe(time.Since(jobStart).Seconds())
 			obs.From(jobCtx).Error("update book scrape failed", "error", err)
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicBookFailed, req.BookID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
@@ -413,7 +468,8 @@ func handleUpdateBookRequests(ctx context.Context, consumer *kafka.Consumer, pro
 
 		publishKeyedOrLog(jobCtx, producer, cfg.TopicUpdateBookCompleted, req.BookID, result)
 		metrics.JobsTotal.WithLabelValues(cfg.TopicUpdateBookRequested, "ok").Inc()
-		obs.From(jobCtx).Info("update book completed")
+		metrics.JobDurationSeconds.WithLabelValues(cfg.TopicUpdateBookRequested).Observe(time.Since(jobStart).Seconds())
+		obs.From(jobCtx).Info("update book completed", "duration_ms", time.Since(jobStart).Milliseconds())
 		commitOrLog(jobCtx, consumer, msg)
 	}
 }
@@ -447,6 +503,8 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 
 		obs.From(jobCtx).Info("processing new-book request")
 
+		jobStart := time.Now()
+
 		wc, err := fetchWebsiteConfig(jobCtx, rdb, req.WebsiteID, req.WebsiteConfig)
 		if err != nil {
 			obs.From(jobCtx).Error("failed to fetch website config", "error", err)
@@ -458,6 +516,7 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 		result, err := engine.ScrapeNewBook(jobCtx, req, wc)
 		if err != nil {
 			metrics.JobsTotal.WithLabelValues(cfg.TopicNewBookRequested, "failed").Inc()
+			metrics.JobDurationSeconds.WithLabelValues(cfg.TopicNewBookRequested).Observe(time.Since(jobStart).Seconds())
 			obs.From(jobCtx).Error("new book scrape failed", "error", err)
 			publishKeyedOrLog(jobCtx, producer, cfg.TopicBookFailed, req.JobID, models.ScrapingBookFailed{
 				JobID:   req.JobID,
@@ -471,7 +530,8 @@ func handleNewBookRequests(ctx context.Context, consumer *kafka.Consumer, produc
 		// No BookID exists yet for a new book, so key on JobID instead.
 		publishKeyedOrLog(jobCtx, producer, cfg.TopicBookCompleted, req.JobID, result)
 		metrics.JobsTotal.WithLabelValues(cfg.TopicNewBookRequested, "ok").Inc()
-		obs.From(jobCtx).Info("new book completed")
+		metrics.JobDurationSeconds.WithLabelValues(cfg.TopicNewBookRequested).Observe(time.Since(jobStart).Seconds())
+		obs.From(jobCtx).Info("new book completed", "duration_ms", time.Since(jobStart).Milliseconds())
 		commitOrLog(jobCtx, consumer, msg)
 	}
 }
@@ -516,6 +576,8 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		func(req models.ScrapingCoversRequest, msg kafka.Message) {
 			defer commitOrLog(jobCtx, consumer, msg)
+
+			jobStart := time.Now()
 
 			results, cleanup := engine.ScrapeCovers(jobCtx, req, wc)
 			defer cleanup()
@@ -579,7 +641,8 @@ func handleCoversRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			})
 
 			metrics.JobsTotal.WithLabelValues(cfg.TopicCoversRequested, "ok").Inc()
-			obs.From(jobCtx).Info("covers request completed", "processed", len(coverResults), "total", len(req.Covers))
+			metrics.JobDurationSeconds.WithLabelValues(cfg.TopicCoversRequested).Observe(time.Since(jobStart).Seconds())
+			obs.From(jobCtx).Info("covers request completed", "processed", len(coverResults), "total", len(req.Covers), "duration_ms", time.Since(jobStart).Milliseconds())
 		}(req, msg)
 	}
 }
@@ -624,6 +687,8 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 
 		func(req models.ScrapingImagesRequest, msg kafka.Message) {
 			defer commitOrLog(jobCtx, consumer, msg)
+
+			jobStart := time.Now()
 
 			results, cleanup := engine.ScrapeImages(jobCtx, req, wc)
 			defer cleanup()
@@ -680,7 +745,8 @@ func handleImagesRequests(ctx context.Context, consumer *kafka.Consumer, produce
 			})
 
 			metrics.JobsTotal.WithLabelValues(cfg.TopicImagesRequested, "ok").Inc()
-			obs.From(jobCtx).Info("images request completed", "processed", count, "total", len(req.ImageURLs))
+			metrics.JobDurationSeconds.WithLabelValues(cfg.TopicImagesRequested).Observe(time.Since(jobStart).Seconds())
+			obs.From(jobCtx).Info("images request completed", "processed", count, "total", len(req.ImageURLs), "duration_ms", time.Since(jobStart).Milliseconds())
 		}(req, msg)
 	}
 }

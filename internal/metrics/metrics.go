@@ -17,6 +17,21 @@ var (
 		Help: "Total number of jobs processed, by topic and outcome (ok|failed|dlq).",
 	}, []string{"topic", "outcome"})
 
+	JobDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "scraper_job_duration_seconds",
+		Help:    "End-to-end job duration, by topic.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"topic"})
+
+	// PhaseDurationSeconds is fed from scraper.PhaseTimings (OBS-05) and only
+	// covers the chapter path today, since that's the only handler with a
+	// nav/prepare/scroll/extract/download/upload phase breakdown.
+	PhaseDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "scraper_phase_duration_seconds",
+		Help:    "Wall-clock time spent in each chapter-scrape phase.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"phase"})
+
 	DLQTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "scraper_dlq_total",
 		Help: "Total number of messages routed to the dead-letter queue, by originating topic.",

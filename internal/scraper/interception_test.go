@@ -111,7 +111,8 @@ func TestScraper_NetworkInterception(t *testing.T) {
 		Selector: "#test-img",
 	}
 
-	title, urls, results, cleanup, err := engine.ScrapeChapter(ctx, req, wc)
+	timings := &PhaseTimings{}
+	title, urls, results, cleanup, err := engine.ScrapeChapter(ctx, req, wc, timings)
 	if err != nil {
 		t.Fatalf("Scrape failed: %v", err)
 	}
@@ -119,6 +120,13 @@ func TestScraper_NetworkInterception(t *testing.T) {
 
 	if len(urls) != 1 {
 		t.Errorf("Expected 1 image URL, got %d", len(urls))
+	}
+
+	// Guards OBS-05: a real navigation must produce a non-zero NavMs so the
+	// wide completion event and scraper_phase_duration_seconds{phase="nav"}
+	// carry real data, not a silently-zero field.
+	if timings.NavMs <= 0 {
+		t.Errorf("Expected NavMs > 0 after a real page.Goto, got %d", timings.NavMs)
 	}
 
 	// Drain results
