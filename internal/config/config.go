@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -38,6 +39,10 @@ type Config struct {
 	// Ops server (OBS-06): /healthz, /readyz, /metrics, env-gated pprof
 	OpsAddr      string
 	PprofEnabled bool
+
+	// ShutdownGracePeriod (BUG-04) bounds how long main waits for in-flight
+	// handlers to drain on SIGTERM/SIGINT before forcing exit.
+	ShutdownGracePeriod time.Duration
 
 	// Kafka Topics
 	TopicChapterRequested string
@@ -95,6 +100,11 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	shutdownGrace, err := getEnvDuration("SHUTDOWN_GRACE_PERIOD", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
 	endpoint := getEnv("STORAGE_ENDPOINT", "localhost:9000")
 	endpoint = strings.TrimPrefix(endpoint, "http://")
 	endpoint = strings.TrimPrefix(endpoint, "https://")
@@ -130,6 +140,8 @@ func LoadConfig() (Config, error) {
 		// Defaults to false so pprof is opt-in even in production; flip it
 		// via env, no rebuild required, and never expose this port publicly.
 		PprofEnabled: os.Getenv("PPROF_ENABLED") == "true",
+
+		ShutdownGracePeriod: shutdownGrace,
 
 		TopicChapterRequested: getEnv("TOPIC_CHAPTER_REQUESTED", "scraping.chapter.requested"),
 		TopicUpdateBookRequested: getEnv("TOPIC_UPDATE_BOOK_REQUESTED", "scraping.update-book.requested"),
@@ -179,6 +191,9 @@ func (c Config) validate() error {
 	if len(c.KafkaBrokers) == 0 || c.KafkaBrokers[0] == "" {
 		return fmt.Errorf("KAFKA_BROKERS must not be empty")
 	}
+	if c.ShutdownGracePeriod < 1*time.Second {
+		return fmt.Errorf("SHUTDOWN_GRACE_PERIOD must be >= 1s, got %s", c.ShutdownGracePeriod)
+	}
 	return nil
 }
 
@@ -211,4 +226,16 @@ func getEnvInt64(key string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("invalid %s=%q: %w", key, v, err)
 	}
 	return n, nil
+}
+
+func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s=%q: %w", key, v, err)
+	}
+	return d, nil
 }

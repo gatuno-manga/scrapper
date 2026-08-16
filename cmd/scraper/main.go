@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -98,16 +99,40 @@ func main() {
 
 	slog.Info("scraper microservice started")
 
-	// Launch handlers
-	go handleChapterRequests(ctx, chapterConsumer, producer, engine, s3, rdb, cfg)
-	go handleUpdateBookRequests(ctx, updateBookConsumer, producer, engine, rdb, cfg)
-	go handleNewBookRequests(ctx, newBookConsumer, producer, engine, rdb, cfg)
-	go handleCoversRequests(ctx, coversConsumer, producer, engine, s3, rdb, cfg)
-	go handleImagesRequests(ctx, imagesConsumer, producer, engine, s3, rdb, cfg)
-	go handleTestRequests(ctx, testConsumer, engine)
+	// Launch handlers. Each goroutine owns one wg.Done() so shutdown can wait
+	// for in-flight jobs to finish (or time out) instead of tearing down the
+	// browser pool / producer / Redis client out from under a live upload
+	// (BUG-04).
+	var wg sync.WaitGroup
+	runHandler := func(handler func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			handler()
+		}()
+	}
+	runHandler(func() { handleChapterRequests(ctx, chapterConsumer, producer, engine, s3, rdb, cfg) })
+	runHandler(func() { handleUpdateBookRequests(ctx, updateBookConsumer, producer, engine, rdb, cfg) })
+	runHandler(func() { handleNewBookRequests(ctx, newBookConsumer, producer, engine, rdb, cfg) })
+	runHandler(func() { handleCoversRequests(ctx, coversConsumer, producer, engine, s3, rdb, cfg) })
+	runHandler(func() { handleImagesRequests(ctx, imagesConsumer, producer, engine, s3, rdb, cfg) })
+	runHandler(func() { handleTestRequests(ctx, testConsumer, engine) })
 
 	<-ctx.Done()
-	slog.Info("shutting down")
+	slog.Info("shutting down, draining in-flight jobs", "grace_period", cfg.ShutdownGracePeriod)
+
+	drained := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+		slog.Info("all handlers drained cleanly")
+	case <-time.After(cfg.ShutdownGracePeriod):
+		slog.Warn("shutdown grace period exceeded, forcing exit", "grace_period", cfg.ShutdownGracePeriod)
+	}
 }
 
 // publishOrLog publishes a message to a Kafka topic and logs a critical error
