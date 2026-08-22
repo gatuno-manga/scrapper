@@ -10,6 +10,10 @@ on:
       - main
       - developer
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     uses: gatuno-manga/workflows/.github/workflows/go-ci.yml@main
