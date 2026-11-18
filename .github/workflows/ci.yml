@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - main
-      - developer
+      - develop
   pull_request:
     branches:
       - main
-      - developer
+      - develop
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,7 +25,7 @@ jobs:
     needs: ci
     if: |
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/developer')
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     uses: gatuno-manga/workflows/.github/workflows/registry.yml@main
     with:
       image_name: gatuno-scraper
